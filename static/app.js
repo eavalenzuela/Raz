@@ -18,8 +18,8 @@ const editorClose = document.getElementById("editor-close");
 
 let currentEdit = null;
 
-const thumbnailUrl = (url) =>
-  `https://image.thum.io/get/width/800/${encodeURIComponent(url)}`;
+const thumbnailUrl = (tile) =>
+  tile.preview || `https://image.thum.io/get/width/800/${encodeURIComponent(tile.url)}`;
 
 const renderTiles = () => {
   tilesContainer.innerHTML = "";
@@ -28,7 +28,7 @@ const renderTiles = () => {
     tileEl.className = "tile";
 
     const img = document.createElement("img");
-    img.src = thumbnailUrl(tile.url);
+    img.src = thumbnailUrl(tile);
     img.alt = `${tile.title} thumbnail`;
 
     const label = document.createElement("div");
@@ -101,7 +101,7 @@ const closeEditor = () => {
   currentEdit = null;
 };
 
-const saveEditor = () => {
+const saveEditor = async () => {
   if (!currentEdit) return;
   const lines = editorText.value
     .split("\n")
@@ -127,6 +127,26 @@ const saveEditor = () => {
       const [name, url] = line.split("|").map((part) => part.trim());
       return { name, url, online: false };
     });
+  }
+
+  try {
+    const response = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tiles: state.tiles,
+        devices: state.devices,
+        services: state.services,
+      }),
+    });
+    if (response.ok) {
+      const updated = await response.json();
+      state.tiles = updated.tiles;
+      state.devices = updated.devices;
+      state.services = updated.services;
+    }
+  } catch (error) {
+    console.error("Failed to save config", error);
   }
 
   renderAll();
