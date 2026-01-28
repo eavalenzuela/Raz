@@ -4,6 +4,7 @@ const state = {
   tiles: [...data.tiles],
   devices: [...data.devices],
   services: [...data.services],
+  tileRefreshHours: data.tile_refresh_hours,
   history: {
     devices: new Map(),
     services: new Map(),
@@ -35,13 +36,14 @@ const thumbnailUrl = (tile) =>
 
 const renderTiles = () => {
   tilesContainer.innerHTML = "";
-  state.tiles.forEach((tile) => {
+  state.tiles.forEach((tile, index) => {
     const tileEl = document.createElement("article");
     tileEl.className = "tile";
 
     const img = document.createElement("img");
     img.src = thumbnailUrl(tile);
     img.alt = `${tile.title} thumbnail`;
+    img.dataset.tileIndex = String(index);
 
     const label = document.createElement("div");
     label.className = "tile-title";
@@ -57,6 +59,23 @@ const renderTiles = () => {
     tileEl.appendChild(label);
     tileEl.appendChild(link);
     tilesContainer.appendChild(tileEl);
+  });
+};
+
+const refreshTilePreviews = () => {
+  const timestamp = Date.now();
+  tilesContainer.querySelectorAll("img").forEach((img) => {
+    const index = Number(img.dataset.tileIndex);
+    const tile = state.tiles[index];
+    if (!tile) return;
+    const baseUrl = thumbnailUrl(tile);
+    try {
+      const url = new URL(baseUrl, window.location.origin);
+      url.searchParams.set("ts", String(timestamp));
+      img.src = url.toString();
+    } catch (error) {
+      console.warn("Failed to refresh tile preview", error);
+    }
   });
 };
 
@@ -409,6 +428,11 @@ const refreshStatuses = async () => {
 renderAll();
 refreshStatuses();
 setInterval(refreshStatuses, 15000);
+
+const refreshIntervalHours = Number(state.tileRefreshHours ?? 6);
+if (Number.isFinite(refreshIntervalHours) && refreshIntervalHours > 0) {
+  setInterval(refreshTilePreviews, refreshIntervalHours * 60 * 60 * 1000);
+}
 
 Array.from(document.querySelectorAll(".edit-button")).forEach((button) => {
   button.addEventListener("click", () => openEditor(button.dataset.edit));

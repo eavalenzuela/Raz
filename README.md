@@ -7,7 +7,18 @@ Raz is a personal homepage dashboard that surfaces quick links alongside device 
 - Quick-link tiles for frequently used sites.
 - Device availability checks via ICMP ping.
 - Service availability checks via HTTP requests.
+- Configurable refresh interval for Favorites live tile thumbnails.
 - JSON status endpoint at `/api/status` for devices and services.
+
+## Configuration
+
+The dashboard configuration lives in `config/dashboard.json`. To control how often the Favorites tile thumbnails refresh, set `tile_refresh_hours` (defaults to `6`). For example:
+
+```json
+{
+  "tile_refresh_hours": 6
+}
+```
 
 ## Running the app
 
