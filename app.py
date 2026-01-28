@@ -19,8 +19,10 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = BASE_DIR / "config"
 CONFIG_PATH = CONFIG_DIR / "dashboard.json"
 PREVIEW_DIR = BASE_DIR / "previews"
+STATUS_HISTORY_PATH = CONFIG_DIR / "status_history.jsonl"
 STATUS_REFRESH_SECONDS = 20
 STATUS_STALE_SECONDS = 60
+STATUS_HISTORY_LIMIT = 240
 
 STATUS_LOCK = threading.Lock()
 STATUS_CACHE: Dict[str, Any] = {
@@ -260,10 +262,12 @@ def build_status_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
 def update_status_cache() -> None:
     config = load_config()
     snapshot = build_status_snapshot(config)
+    checked_at = time.time()
     with STATUS_LOCK:
         STATUS_CACHE["devices"] = snapshot["devices"]
         STATUS_CACHE["services"] = snapshot["services"]
-        STATUS_CACHE["last_checked"] = time.time()
+        STATUS_CACHE["last_checked"] = checked_at
+        append_status_history(snapshot, checked_at)
 
 
 def status_worker() -> None:
@@ -305,6 +309,55 @@ def status_payload() -> Dict[str, Any]:
     }
 
 
+def append_status_history(snapshot: Dict[str, Any], checked_at: float) -> None:
+    ensure_directories()
+    record = {
+        "timestamp": datetime.fromtimestamp(checked_at, tz=timezone.utc).isoformat(),
+        "epoch": checked_at,
+        "devices": snapshot.get("devices", []),
+        "services": snapshot.get("services", []),
+    }
+    with STATUS_HISTORY_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record))
+        handle.write("\n")
+    trim_status_history(STATUS_HISTORY_LIMIT)
+
+
+def trim_status_history(max_entries: int) -> None:
+    if not STATUS_HISTORY_PATH.exists():
+        return
+    try:
+        with STATUS_HISTORY_PATH.open("r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return
+    if len(lines) <= max_entries:
+        return
+    keep = lines[-max_entries:]
+    with STATUS_HISTORY_PATH.open("w", encoding="utf-8") as handle:
+        handle.writelines(keep)
+
+
+def load_status_history(limit: int) -> List[Dict[str, Any]]:
+    if not STATUS_HISTORY_PATH.exists() or limit <= 0:
+        return []
+    try:
+        with STATUS_HISTORY_PATH.open("r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return []
+    entries: List[Dict[str, Any]] = []
+    for line in lines[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
 @app.route("/previews/<path:filename>")
 def previews(filename: str):
     return send_from_directory(PREVIEW_DIR, filename)
@@ -332,6 +385,18 @@ def config():
 @app.route("/api/status")
 def status():
     return jsonify(status_payload())
+
+
+@app.route("/api/status/history")
+def status_history():
+    raw_limit = request.args.get("limit", type=int)
+    limit = raw_limit if raw_limit is not None else 120
+    if limit < 1:
+        limit = 1
+    if limit > STATUS_HISTORY_LIMIT:
+        limit = STATUS_HISTORY_LIMIT
+    history = load_status_history(limit)
+    return jsonify({"entries": history, "limit": limit, "count": len(history)})
 
 
 @app.before_request

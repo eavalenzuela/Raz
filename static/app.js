@@ -4,6 +4,10 @@ const state = {
   tiles: [...data.tiles],
   devices: [...data.devices],
   services: [...data.services],
+  history: {
+    devices: new Map(),
+    services: new Map(),
+  },
 };
 
 const tilesContainer = document.getElementById("tiles");
@@ -56,13 +60,14 @@ const renderTiles = () => {
   });
 };
 
-const renderStatusList = (container, items, keyLabel) => {
+const renderStatusList = (container, items, keyLabel, historyMap) => {
   container.innerHTML = "";
   items.forEach((item) => {
     const wrapper = document.createElement("div");
     wrapper.className = "status-item";
 
     const info = document.createElement("div");
+    info.className = "status-info";
     const title = document.createElement("strong");
     title.textContent = item.name;
     const sub = document.createElement("span");
@@ -71,6 +76,34 @@ const renderStatusList = (container, items, keyLabel) => {
     info.appendChild(document.createElement("br"));
     info.appendChild(sub);
 
+    const meta = document.createElement("div");
+    meta.className = "status-meta-row";
+    const sparkline = document.createElement("div");
+    sparkline.className = "status-sparkline";
+    const history = historyMap?.get(item.name) ?? [];
+    if (history.length) {
+      history.forEach((online) => {
+        const bar = document.createElement("span");
+        bar.className = online ? "spark online" : "spark offline";
+        sparkline.appendChild(bar);
+      });
+    } else {
+      const empty = document.createElement("span");
+      empty.className = "spark empty";
+      sparkline.appendChild(empty);
+    }
+    const badge = document.createElement("div");
+    badge.className = "uptime-badge";
+    if (history.length) {
+      const onlineCount = history.filter(Boolean).length;
+      const uptime = Math.round((onlineCount / history.length) * 100);
+      badge.textContent = `Uptime ${uptime}%`;
+    } else {
+      badge.textContent = "Uptime --";
+    }
+    meta.appendChild(badge);
+    meta.appendChild(sparkline);
+
     const indicator = document.createElement("div");
     indicator.className = "status-indicator";
     if (item.online) {
@@ -78,6 +111,7 @@ const renderStatusList = (container, items, keyLabel) => {
     }
 
     wrapper.appendChild(info);
+    wrapper.appendChild(meta);
     wrapper.appendChild(indicator);
     container.appendChild(wrapper);
   });
@@ -85,8 +119,8 @@ const renderStatusList = (container, items, keyLabel) => {
 
 const renderAll = () => {
   renderTiles();
-  renderStatusList(devicesContainer, state.devices, "address");
-  renderStatusList(servicesContainer, state.services, "check_url");
+  renderStatusList(devicesContainer, state.devices, "address", state.history.devices);
+  renderStatusList(servicesContainer, state.services, "check_url", state.history.services);
 };
 
 const formatLastUpdated = (timestamp) => {
@@ -332,16 +366,41 @@ const saveEditor = async () => {
   closeEditor();
 };
 
+const buildHistoryMap = (entries, key) => {
+  const map = new Map();
+  entries.forEach((entry) => {
+    (entry[key] || []).forEach((item) => {
+      if (!item.name) return;
+      if (!map.has(item.name)) {
+        map.set(item.name, []);
+      }
+      map.get(item.name).push(Boolean(item.online));
+    });
+  });
+  return map;
+};
+
 const refreshStatuses = async () => {
   try {
-    const response = await fetch("/api/status");
-    if (!response.ok) return;
-    const payload = await response.json();
+    const [statusResponse, historyResponse] = await Promise.all([
+      fetch("/api/status"),
+      fetch("/api/status/history?limit=60"),
+    ]);
+    if (!statusResponse.ok) return;
+    const payload = await statusResponse.json();
+    let historyPayload = null;
+    if (historyResponse.ok) {
+      historyPayload = await historyResponse.json();
+    }
     state.devices = payload.devices;
     state.services = payload.services;
+    if (historyPayload?.entries) {
+      state.history.devices = buildHistoryMap(historyPayload.entries, "devices");
+      state.history.services = buildHistoryMap(historyPayload.entries, "services");
+    }
     renderStatusMeta(payload);
-    renderStatusList(devicesContainer, state.devices, "address");
-    renderStatusList(servicesContainer, state.services, "check_url");
+    renderStatusList(devicesContainer, state.devices, "address", state.history.devices);
+    renderStatusList(servicesContainer, state.services, "check_url", state.history.services);
   } catch (error) {
     console.error("Status refresh failed", error);
   }
