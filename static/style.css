@@ -230,6 +230,27 @@ body {
   resize: vertical;
 }
 
+.editor-card textarea.has-errors {
+  border-color: var(--red);
+  box-shadow: 0 0 0 1px rgba(255, 93, 93, 0.35);
+}
+
+.editor-errors {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(255, 93, 93, 0.12);
+  border: 1px solid rgba(255, 93, 93, 0.4);
+  color: #ffd1d1;
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 0.85rem;
+}
+
+.editor-errors.active {
+  display: flex;
+}
+
 .editor-actions {
   display: flex;
   justify-content: flex-end;
