@@ -9,6 +9,8 @@ const state = {
 const tilesContainer = document.getElementById("tiles");
 const devicesContainer = document.getElementById("devices");
 const servicesContainer = document.getElementById("services");
+const devicesUpdated = document.getElementById("devices-updated");
+const servicesUpdated = document.getElementById("services-updated");
 
 const editor = document.getElementById("editor");
 const editorTitle = document.getElementById("editor-title");
@@ -79,6 +81,23 @@ const renderAll = () => {
   renderTiles();
   renderStatusList(devicesContainer, state.devices, "address");
   renderStatusList(servicesContainer, state.services, "url");
+};
+
+const formatLastUpdated = (timestamp) => {
+  if (!timestamp) return "Last updated: pending";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "Last updated: unknown";
+  return `Last updated: ${date.toLocaleTimeString()}`;
+};
+
+const renderStatusMeta = ({ last_checked: lastChecked, stale }) => {
+  const label = `${formatLastUpdated(lastChecked)}${stale ? " (stale)" : ""}`;
+  devicesUpdated.textContent = label;
+  servicesUpdated.textContent = label;
+  devicesUpdated.classList.toggle("is-stale", Boolean(stale));
+  servicesUpdated.classList.toggle("is-stale", Boolean(stale));
+  devicesContainer.classList.toggle("status-stale", Boolean(stale));
+  servicesContainer.classList.toggle("status-stale", Boolean(stale));
 };
 
 const openEditor = (target) => {
@@ -160,6 +179,7 @@ const refreshStatuses = async () => {
     const payload = await response.json();
     state.devices = payload.devices;
     state.services = payload.services;
+    renderStatusMeta(payload);
     renderStatusList(devicesContainer, state.devices, "address");
     renderStatusList(servicesContainer, state.services, "url");
   } catch (error) {

@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from flask import Flask, jsonify, render_template, request, send_from_directory
@@ -15,6 +18,16 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = BASE_DIR / "config"
 CONFIG_PATH = CONFIG_DIR / "dashboard.json"
 PREVIEW_DIR = BASE_DIR / "previews"
+STATUS_REFRESH_SECONDS = 20
+STATUS_STALE_SECONDS = 60
+
+STATUS_LOCK = threading.Lock()
+STATUS_CACHE: Dict[str, Any] = {
+    "devices": [],
+    "services": [],
+    "last_checked": None,
+}
+STATUS_SCHEDULER_STARTED = False
 
 
 DEFAULT_CONFIG: Dict[str, List[Dict[str, str]]] = {
@@ -145,6 +158,66 @@ def check_service(url: str) -> bool:
         return False
 
 
+def build_status_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
+    device_statuses = [
+        {"name": device["name"], "address": device["address"], "online": ping_device(device["address"])}
+        for device in config["devices"]
+    ]
+    service_statuses = [
+        {"name": service["name"], "url": service["url"], "online": check_service(service["url"])}
+        for service in config["services"]
+    ]
+    return {"devices": device_statuses, "services": service_statuses}
+
+
+def update_status_cache() -> None:
+    config = load_config()
+    snapshot = build_status_snapshot(config)
+    with STATUS_LOCK:
+        STATUS_CACHE["devices"] = snapshot["devices"]
+        STATUS_CACHE["services"] = snapshot["services"]
+        STATUS_CACHE["last_checked"] = time.time()
+
+
+def status_worker() -> None:
+    while True:
+        update_status_cache()
+        time.sleep(STATUS_REFRESH_SECONDS)
+
+
+def start_status_scheduler() -> None:
+    global STATUS_SCHEDULER_STARTED
+    if STATUS_SCHEDULER_STARTED:
+        return
+    STATUS_SCHEDULER_STARTED = True
+    thread = threading.Thread(target=status_worker, daemon=True)
+    thread.start()
+
+
+def status_payload() -> Dict[str, Any]:
+    with STATUS_LOCK:
+        devices = list(STATUS_CACHE["devices"])
+        services = list(STATUS_CACHE["services"])
+        last_checked = STATUS_CACHE["last_checked"]
+    now = time.time()
+    age_seconds: Optional[float] = None
+    if last_checked is not None:
+        age_seconds = now - last_checked
+    stale = last_checked is None or age_seconds is None or age_seconds > STATUS_STALE_SECONDS
+    last_checked_iso = (
+        datetime.fromtimestamp(last_checked, tz=timezone.utc).isoformat()
+        if last_checked is not None
+        else None
+    )
+    return {
+        "devices": devices,
+        "services": services,
+        "last_checked": last_checked_iso,
+        "age_seconds": age_seconds,
+        "stale": stale,
+    }
+
+
 @app.route("/previews/<path:filename>")
 def previews(filename: str):
     return send_from_directory(PREVIEW_DIR, filename)
@@ -171,17 +244,14 @@ def config():
 
 @app.route("/api/status")
 def status():
-    config = load_config()
-    device_statuses = [
-        {"name": device["name"], "address": device["address"], "online": ping_device(device["address"])}
-        for device in config["devices"]
-    ]
-    service_statuses = [
-        {"name": service["name"], "url": service["url"], "online": check_service(service["url"])}
-        for service in config["services"]
-    ]
-    return jsonify({"devices": device_statuses, "services": service_statuses})
+    return jsonify(status_payload())
+
+
+@app.before_request
+def ensure_scheduler_started() -> None:
+    start_status_scheduler()
 
 
 if __name__ == "__main__":
+    start_status_scheduler()
     app.run(host="0.0.0.0", port=5000, debug=True)
