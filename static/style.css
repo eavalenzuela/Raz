@@ -64,6 +64,16 @@ body {
   font-size: 0.9rem;
 }
 
+.status-meta {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.status-meta.is-stale {
+  color: #ffb347;
+}
+
 .edit-button {
   background: transparent;
   border: 1px solid var(--panel-border);
@@ -137,6 +147,14 @@ body {
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+}
+
+.status-list.status-stale {
+  opacity: 0.65;
+}
+
+.status-list.status-stale .status-indicator {
+  box-shadow: none;
 }
 
 .status-item {
