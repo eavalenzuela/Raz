@@ -1,0 +1,52 @@
+{
+  "tiles": [
+    {
+      "title": "Docs",
+      "url": "https://docs.python.org/3/",
+      "preview": "83c002acd8b3.jpg"
+    },
+    {
+      "title": "Grafana",
+      "url": "https://grafana.com/",
+      "preview": "ddfe3247c226.jpg"
+    },
+    {
+      "title": "Jellyfin",
+      "url": "https://jellyfin.org/",
+      "preview": "90ae709340b1.jpg"
+    },
+    {
+      "title": "Kavita",
+      "url": "https://www.kavitareader.com/",
+      "preview": "1d9569faf2a8.jpg"
+    }
+  ],
+  "devices": [
+    {
+      "name": "Router",
+      "address": "192.168.1.1"
+    },
+    {
+      "name": "NAS",
+      "address": "192.168.1.10"
+    },
+    {
+      "name": "Desktop",
+      "address": "192.168.1.20"
+    }
+  ],
+  "services": [
+    {
+      "name": "Jellyfin",
+      "url": "https://demo.jellyfin.org/stable"
+    },
+    {
+      "name": "Kavita",
+      "url": "https://www.kavitareader.com/"
+    },
+    {
+      "name": "Calibre",
+      "url": "https://calibre-ebook.com/"
+    }
+  ]
+}
