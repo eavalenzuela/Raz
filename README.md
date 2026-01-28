@@ -1,6 +1,6 @@
-# Raz Dashboard
+# Raz
 
-Raz Dashboard is a personal homepage dashboard that surfaces quick links alongside device and service monitoring. The landing page shows tiles for common resources, plus live status indicators for home network devices and self-hosted services driven by a JSON status API.
+Raz is a personal homepage dashboard that surfaces quick links alongside device and service monitoring. The landing page shows tiles for common resources, plus live status indicators for home network devices and self-hosted services driven by a JSON status API.
 
 ## Features
 
