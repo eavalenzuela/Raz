@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Personal Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    <script>
+      window.__DASHBOARD_DATA__ = {
+        tiles: {{ tiles_json | safe }},
+        devices: {{ devices_json | safe }},
+        services: {{ services_json | safe }},
+      };
+    </script>
+  </head>
+  <body>
+    <main class="dashboard">
+      <section class="pane pane-a">
+        <header class="pane-header">
+          <div>
+            <h2>Web Tiles</h2>
+            <p class="subtitle">Quick links with live thumbnails.</p>
+          </div>
+          <button class="edit-button" data-edit="tiles" aria-label="Edit tiles">
+            ✎
+          </button>
+        </header>
+        <div id="tiles" class="tiles-grid"></div>
+      </section>
+
+      <aside class="pane-column">
+        <section class="pane pane-b">
+          <header class="pane-header">
+            <div>
+              <h2>Devices</h2>
+              <p class="subtitle">Ping checks for your network.</p>
+            </div>
+            <button class="edit-button" data-edit="devices" aria-label="Edit devices">
+              ✎
+            </button>
+          </header>
+          <div id="devices" class="status-list"></div>
+        </section>
+
+        <section class="pane pane-c">
+          <header class="pane-header">
+            <div>
+              <h2>Services</h2>
+              <p class="subtitle">Self-hosted services availability.</p>
+            </div>
+            <button class="edit-button" data-edit="services" aria-label="Edit services">
+              ✎
+            </button>
+          </header>
+          <div id="services" class="status-list"></div>
+        </section>
+      </aside>
+    </main>
+    <div id="editor" class="editor-modal" aria-hidden="true">
+      <div class="editor-card">
+        <header>
+          <h3 id="editor-title">Edit</h3>
+          <button id="editor-close" aria-label="Close editor">×</button>
+        </header>
+        <p class="editor-help">
+          Enter one item per line. For tiles: <code>Title | https://example.com</code>.
+          For devices: <code>Name | 192.168.1.2</code>. For services: <code>Name | https://...</code>.
+        </p>
+        <textarea id="editor-text" rows="8"></textarea>
+        <div class="editor-actions">
+          <button id="editor-save">Save</button>
+        </div>
+      </div>
+    </div>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>
