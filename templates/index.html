@@ -10,6 +10,7 @@
         tiles: {{ tiles_json | safe }},
         devices: {{ devices_json | safe }},
         services: {{ services_json | safe }},
+        tile_refresh_hours: {{ tile_refresh_hours | tojson }},
       };
     </script>
   </head>

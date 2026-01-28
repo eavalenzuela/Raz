@@ -23,6 +23,7 @@ STATUS_HISTORY_PATH = CONFIG_DIR / "status_history.jsonl"
 STATUS_REFRESH_SECONDS = 20
 STATUS_STALE_SECONDS = 60
 STATUS_HISTORY_LIMIT = 240
+DEFAULT_TILE_REFRESH_HOURS = 6
 
 STATUS_LOCK = threading.Lock()
 STATUS_CACHE: Dict[str, Any] = {
@@ -71,6 +72,7 @@ DEFAULT_CONFIG: Dict[str, List[Dict[str, Any]]] = {
             "path": "",
         },
     ],
+    "tile_refresh_hours": DEFAULT_TILE_REFRESH_HOURS,
 }
 
 
@@ -117,10 +119,14 @@ def load_config() -> Dict[str, Any]:
             data = json.load(handle)
     else:
         data = DEFAULT_CONFIG
+    tile_refresh_hours = data.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS)
+    if not isinstance(tile_refresh_hours, (int, float)) or tile_refresh_hours <= 0:
+        tile_refresh_hours = DEFAULT_TILE_REFRESH_HOURS
     data = {
         "tiles": normalize_tiles(data.get("tiles", [])),
         "devices": data.get("devices", []),
         "services": data.get("services", []),
+        "tile_refresh_hours": tile_refresh_hours,
     }
     save_config(data)
     return data
@@ -144,6 +150,7 @@ def serialize_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "tiles": tiles,
         "devices": config.get("devices", []),
         "services": config.get("services", []),
+        "tile_refresh_hours": config.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS),
     }
 
 
@@ -153,11 +160,13 @@ def index() -> str:
     tiles = config["tiles"]
     devices = config["devices"]
     services = config["services"]
+    tile_refresh_hours = config["tile_refresh_hours"]
     return render_template(
         "index.html",
         tiles_json=json.dumps(tiles),
         devices_json=json.dumps(devices),
         services_json=json.dumps(services),
+        tile_refresh_hours=tile_refresh_hours,
     )
 
 
@@ -377,6 +386,7 @@ def config():
         "tiles": normalize_tiles(tiles),
         "devices": devices,
         "services": services,
+        "tile_refresh_hours": current.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS),
     }
     save_config(updated)
     return jsonify(serialize_config(updated))

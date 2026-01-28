@@ -60,5 +60,6 @@
       "expected_status": 200,
       "path": ""
     }
-  ]
+  ],
+  "tile_refresh_hours": 6
 }
