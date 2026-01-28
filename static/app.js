@@ -17,6 +17,12 @@ const editorTitle = document.getElementById("editor-title");
 const editorText = document.getElementById("editor-text");
 const editorSave = document.getElementById("editor-save");
 const editorClose = document.getElementById("editor-close");
+const editorErrors = document.createElement("div");
+editorErrors.id = "editor-errors";
+editorErrors.className = "editor-errors";
+editorErrors.setAttribute("role", "alert");
+editorErrors.setAttribute("aria-live", "polite");
+editorText.insertAdjacentElement("afterend", editorErrors);
 
 let currentEdit = null;
 
@@ -103,6 +109,7 @@ const renderStatusMeta = ({ last_checked: lastChecked, stale }) => {
 const openEditor = (target) => {
   currentEdit = target;
   editorTitle.textContent = `Edit ${target}`;
+  clearEditorErrors();
   const items = state[target];
   editorText.value = items
     .map((item) => {
@@ -118,34 +125,127 @@ const closeEditor = () => {
   editor.classList.remove("active");
   editor.setAttribute("aria-hidden", "true");
   currentEdit = null;
+  clearEditorErrors();
+};
+
+const clearEditorErrors = () => {
+  editorErrors.innerHTML = "";
+  editorErrors.classList.remove("active");
+  editorText.classList.remove("has-errors");
+};
+
+const showEditorErrors = (errors) => {
+  editorErrors.innerHTML = "";
+  if (!errors.length) {
+    clearEditorErrors();
+    return;
+  }
+  errors.forEach((message) => {
+    const line = document.createElement("div");
+    line.className = "editor-error-item";
+    line.textContent = message;
+    editorErrors.appendChild(line);
+  });
+  editorErrors.classList.add("active");
+  editorText.classList.add("has-errors");
+};
+
+const isValidUrl = (value) => {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol);
+  } catch {
+    return false;
+  }
+};
+
+const isValidIpv4 = (value) => {
+  const parts = value.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((part) => {
+    if (!/^\d+$/.test(part)) return false;
+    const num = Number(part);
+    return num >= 0 && num <= 255;
+  });
+};
+
+const isValidHostname = (value) => {
+  if (!value) return false;
+  if (value.toLowerCase() === "localhost") return true;
+  if (value.length > 253) return false;
+  const labels = value.split(".");
+  return labels.every((label) => {
+    if (!label || label.length > 63) return false;
+    if (!/^[a-z0-9-]+$/i.test(label)) return false;
+    return !label.startsWith("-") && !label.endsWith("-");
+  });
+};
+
+const validateLines = (target, lines) => {
+  const errors = [];
+  const parsed = [];
+  lines.forEach((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    const parts = trimmed.split("|");
+    const left = (parts.shift() || "").trim();
+    const right = parts.join("|").trim();
+    const lineNumber = index + 1;
+    const label = target === "tiles" ? "title" : "name";
+    if (!left) {
+      errors.push(`Line ${lineNumber}: ${label} is required.`);
+    }
+    if (!right) {
+      errors.push(`Line ${lineNumber}: ${target === "devices" ? "address" : "URL"} is required.`);
+      return;
+    }
+    if (target === "devices") {
+      if (!(isValidIpv4(right) || isValidHostname(right))) {
+        errors.push(`Line ${lineNumber}: address must be a valid IP or hostname.`);
+      }
+    } else if (!isValidUrl(right)) {
+      errors.push(`Line ${lineNumber}: URL must be a valid http(s) address.`);
+    }
+    parsed.push({ left, right });
+  });
+  return { errors, parsed };
 };
 
 const saveEditor = async () => {
   if (!currentEdit) return;
-  const lines = editorText.value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+  const lines = editorText.value.split("\n");
+  const { errors, parsed } = validateLines(currentEdit, lines);
+  if (errors.length) {
+    showEditorErrors(errors);
+    return;
+  }
+  clearEditorErrors();
+  const normalized = parsed.map((item) => ({
+    left: item.left,
+    right: item.right,
+  }));
 
   if (currentEdit === "tiles") {
-    state.tiles = lines.map((line) => {
-      const [title, url] = line.split("|").map((part) => part.trim());
-      return { title, url };
-    });
+    state.tiles = normalized.map((item) => ({
+      title: item.left,
+      url: item.right,
+    }));
   }
 
   if (currentEdit === "devices") {
-    state.devices = lines.map((line) => {
-      const [name, address] = line.split("|").map((part) => part.trim());
-      return { name, address, online: false };
-    });
+    state.devices = normalized.map((item) => ({
+      name: item.left,
+      address: item.right,
+      online: false,
+    }));
   }
 
   if (currentEdit === "services") {
-    state.services = lines.map((line) => {
-      const [name, url] = line.split("|").map((part) => part.trim());
-      return { name, url, online: false };
-    });
+    state.services = normalized.map((item) => ({
+      name: item.left,
+      url: item.right,
+      online: false,
+    }));
   }
 
   try {
@@ -200,3 +300,4 @@ editor.addEventListener("click", (event) => {
   if (event.target === editor) closeEditor();
 });
 editorSave.addEventListener("click", saveEditor);
+editorText.addEventListener("input", clearEditorErrors);
