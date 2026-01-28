@@ -38,15 +38,27 @@
   "services": [
     {
       "name": "Jellyfin",
-      "url": "https://demo.jellyfin.org/stable"
+      "url": "https://demo.jellyfin.org/stable",
+      "method": "GET",
+      "timeout": 2,
+      "expected_status": 200,
+      "path": ""
     },
     {
       "name": "Kavita",
-      "url": "https://www.kavitareader.com/"
+      "url": "https://www.kavitareader.com/",
+      "method": "GET",
+      "timeout": 2,
+      "expected_status": 200,
+      "path": ""
     },
     {
       "name": "Calibre",
-      "url": "https://calibre-ebook.com/"
+      "url": "https://calibre-ebook.com/",
+      "method": "GET",
+      "timeout": 2,
+      "expected_status": 200,
+      "path": ""
     }
   ]
 }

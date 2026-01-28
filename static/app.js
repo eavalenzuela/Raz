@@ -66,7 +66,7 @@ const renderStatusList = (container, items, keyLabel) => {
     const title = document.createElement("strong");
     title.textContent = item.name;
     const sub = document.createElement("span");
-    sub.textContent = item[keyLabel];
+    sub.textContent = item[keyLabel] ?? item.url ?? "";
     info.appendChild(title);
     info.appendChild(document.createElement("br"));
     info.appendChild(sub);
@@ -86,7 +86,7 @@ const renderStatusList = (container, items, keyLabel) => {
 const renderAll = () => {
   renderTiles();
   renderStatusList(devicesContainer, state.devices, "address");
-  renderStatusList(servicesContainer, state.services, "url");
+  renderStatusList(servicesContainer, state.services, "check_url");
 };
 
 const formatLastUpdated = (timestamp) => {
@@ -106,6 +106,20 @@ const renderStatusMeta = ({ last_checked: lastChecked, stale }) => {
   servicesContainer.classList.toggle("status-stale", Boolean(stale));
 };
 
+const formatServiceLine = (service) => {
+  const extras = [
+    service.method ? service.method.toUpperCase() : "",
+    service.timeout ?? "",
+    service.expected_status ?? "",
+    service.path ?? "",
+  ].map((value) => (value === null || value === undefined ? "" : String(value).trim()));
+  const parts = [service.name ?? "", service.url ?? "", ...extras].map((value) => String(value).trim());
+  while (parts.length > 2 && !parts[parts.length - 1]) {
+    parts.pop();
+  }
+  return parts.join(" | ");
+};
+
 const openEditor = (target) => {
   currentEdit = target;
   editorTitle.textContent = `Edit ${target}`;
@@ -113,6 +127,9 @@ const openEditor = (target) => {
   const items = state[target];
   editorText.value = items
     .map((item) => {
+      if (target === "services") {
+        return formatServiceLine(item);
+      }
       const key = target === "devices" ? "address" : "url";
       return `${item.name} | ${item[key]}`;
     })
@@ -181,20 +198,59 @@ const isValidHostname = (value) => {
   });
 };
 
+const VALID_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
+
 const validateLines = (target, lines) => {
   const errors = [];
   const parsed = [];
   lines.forEach((line, index) => {
     const trimmed = line.trim();
     if (!trimmed) return;
-    const parts = trimmed.split("|");
-    const left = (parts.shift() || "").trim();
-    const right = parts.join("|").trim();
     const lineNumber = index + 1;
+    const parts = trimmed.split("|").map((part) => part.trim());
     const label = target === "tiles" ? "title" : "name";
-    if (!left) {
+    const name = parts[0] || "";
+    if (!name) {
       errors.push(`Line ${lineNumber}: ${label} is required.`);
     }
+
+    if (target === "services") {
+      const url = parts[1] || "";
+      if (!url) {
+        errors.push(`Line ${lineNumber}: URL is required.`);
+        return;
+      }
+      if (!isValidUrl(url)) {
+        errors.push(`Line ${lineNumber}: URL must be a valid http(s) address.`);
+      }
+      const rawMethod = parts[2] || "";
+      const method = rawMethod.toUpperCase();
+      if (rawMethod && !VALID_METHODS.has(method)) {
+        errors.push(`Line ${lineNumber}: HTTP method must be one of ${Array.from(VALID_METHODS).join(", ")}.`);
+      }
+      const timeoutRaw = parts[3] || "";
+      const timeout = timeoutRaw ? Number(timeoutRaw) : null;
+      if (timeoutRaw && (!Number.isFinite(timeout) || timeout <= 0)) {
+        errors.push(`Line ${lineNumber}: timeout must be a positive number.`);
+      }
+      const statusRaw = parts[4] || "";
+      const expectedStatus = statusRaw ? Number(statusRaw) : null;
+      if (statusRaw && (!Number.isInteger(expectedStatus) || expectedStatus < 100 || expectedStatus > 599)) {
+        errors.push(`Line ${lineNumber}: expected status must be a valid HTTP code.`);
+      }
+      const path = parts.slice(5).join("|").trim();
+      parsed.push({
+        name,
+        url,
+        method,
+        timeout,
+        expectedStatus,
+        path,
+      });
+      return;
+    }
+
+    const right = parts.slice(1).join("|").trim();
     if (!right) {
       errors.push(`Line ${lineNumber}: ${target === "devices" ? "address" : "URL"} is required.`);
       return;
@@ -206,7 +262,7 @@ const validateLines = (target, lines) => {
     } else if (!isValidUrl(right)) {
       errors.push(`Line ${lineNumber}: URL must be a valid http(s) address.`);
     }
-    parsed.push({ left, right });
+    parsed.push({ left: name, right });
   });
   return { errors, parsed };
 };
@@ -241,9 +297,13 @@ const saveEditor = async () => {
   }
 
   if (currentEdit === "services") {
-    state.services = normalized.map((item) => ({
-      name: item.left,
-      url: item.right,
+    state.services = parsed.map((item) => ({
+      name: item.name,
+      url: item.url,
+      method: item.method || "GET",
+      timeout: item.timeout ?? 2,
+      expected_status: item.expectedStatus ?? 200,
+      path: item.path || "",
       online: false,
     }));
   }
@@ -281,7 +341,7 @@ const refreshStatuses = async () => {
     state.services = payload.services;
     renderStatusMeta(payload);
     renderStatusList(devicesContainer, state.devices, "address");
-    renderStatusList(servicesContainer, state.services, "url");
+    renderStatusList(servicesContainer, state.services, "check_url");
   } catch (error) {
     console.error("Status refresh failed", error);
   }
