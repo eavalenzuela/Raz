@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin
 
 import requests
 from flask import Flask, jsonify, render_template, request, send_from_directory
@@ -30,7 +31,7 @@ STATUS_CACHE: Dict[str, Any] = {
 STATUS_SCHEDULER_STARTED = False
 
 
-DEFAULT_CONFIG: Dict[str, List[Dict[str, str]]] = {
+DEFAULT_CONFIG: Dict[str, List[Dict[str, Any]]] = {
     "tiles": [
         {"title": "Docs", "url": "https://docs.python.org/3/"},
         {"title": "Grafana", "url": "https://grafana.com/"},
@@ -43,9 +44,30 @@ DEFAULT_CONFIG: Dict[str, List[Dict[str, str]]] = {
         {"name": "Desktop", "address": "192.168.1.20"},
     ],
     "services": [
-        {"name": "Jellyfin", "url": "https://demo.jellyfin.org/stable"},
-        {"name": "Kavita", "url": "https://www.kavitareader.com/"},
-        {"name": "Calibre", "url": "https://calibre-ebook.com/"},
+        {
+            "name": "Jellyfin",
+            "url": "https://demo.jellyfin.org/stable",
+            "method": "GET",
+            "timeout": 2,
+            "expected_status": 200,
+            "path": "",
+        },
+        {
+            "name": "Kavita",
+            "url": "https://www.kavitareader.com/",
+            "method": "GET",
+            "timeout": 2,
+            "expected_status": 200,
+            "path": "",
+        },
+        {
+            "name": "Calibre",
+            "url": "https://calibre-ebook.com/",
+            "method": "GET",
+            "timeout": 2,
+            "expected_status": 200,
+            "path": "",
+        },
     ],
 }
 
@@ -150,12 +172,63 @@ def ping_device(address: str) -> bool:
     return result.returncode == 0
 
 
-def check_service(url: str) -> bool:
+def _service_timeout(raw_timeout: Any) -> float:
     try:
-        response = requests.get(url, timeout=2)
-        return response.ok
-    except requests.RequestException:
-        return False
+        timeout = float(raw_timeout)
+        return timeout if timeout > 0 else 2.0
+    except (TypeError, ValueError):
+        return 2.0
+
+
+def _service_expected_status(raw_status: Any) -> int:
+    try:
+        status = int(raw_status)
+        if 100 <= status <= 599:
+            return status
+    except (TypeError, ValueError):
+        pass
+    return 200
+
+
+def build_service_check(service: Dict[str, Any]) -> Dict[str, Any]:
+    method = str(service.get("method", "GET") or "GET").strip().upper() or "GET"
+    timeout = _service_timeout(service.get("timeout", 2))
+    expected_status = _service_expected_status(service.get("expected_status", 200))
+    path = str(service.get("path", "") or "").strip()
+    url = str(service.get("url", "") or "").strip()
+    check_url = urljoin(f"{url.rstrip('/')}/", path.lstrip("/")) if path else url
+    return {
+        "method": method,
+        "timeout": timeout,
+        "expected_status": expected_status,
+        "path": path,
+        "check_url": check_url,
+        "url": url,
+    }
+
+
+def check_service(service: Dict[str, Any]) -> Dict[str, Any]:
+    settings = build_service_check(service)
+    started = time.perf_counter()
+    try:
+        response = requests.request(settings["method"], settings["check_url"], timeout=settings["timeout"])
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        online = response.status_code == settings["expected_status"]
+        return {
+            **settings,
+            "status_code": response.status_code,
+            "response_time_ms": round(elapsed_ms, 2),
+            "online": online,
+        }
+    except requests.RequestException as exc:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        return {
+            **settings,
+            "status_code": None,
+            "response_time_ms": round(elapsed_ms, 2),
+            "online": False,
+            "error": str(exc),
+        }
 
 
 def build_status_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -163,10 +236,24 @@ def build_status_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
         {"name": device["name"], "address": device["address"], "online": ping_device(device["address"])}
         for device in config["devices"]
     ]
-    service_statuses = [
-        {"name": service["name"], "url": service["url"], "online": check_service(service["url"])}
-        for service in config["services"]
-    ]
+    service_statuses = []
+    for service in config["services"]:
+        result = check_service(service)
+        service_statuses.append(
+            {
+                "name": service.get("name", ""),
+                "url": result["url"],
+                "check_url": result["check_url"],
+                "method": result["method"],
+                "timeout": result["timeout"],
+                "expected_status": result["expected_status"],
+                "path": result["path"],
+                "status_code": result["status_code"],
+                "response_time_ms": result["response_time_ms"],
+                "online": result["online"],
+                "error": result.get("error"),
+            }
+        )
     return {"devices": device_statuses, "services": service_statuses}
 
 
