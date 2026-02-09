@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import queue
 import re
 import subprocess
 import threading
@@ -36,6 +37,11 @@ STATUS_CACHE: Dict[str, Any] = {
     "last_checked": None,
 }
 STATUS_SCHEDULER_STARTED = False
+PREVIEW_FETCH_QUEUE: "queue.Queue[tuple[str, str]]" = queue.Queue()
+PREVIEW_PENDING: set[str] = set()
+PREVIEW_LOCK = threading.Lock()
+PREVIEW_WORKER_STARTED = False
+PLACEHOLDER_PREVIEW = "preview-placeholder.svg"
 
 
 DEFAULT_CONFIG: Dict[str, List[Dict[str, Any]]] = {
@@ -97,11 +103,43 @@ def fetch_preview(url: str, destination: Path) -> None:
     destination.write_bytes(response.content)
 
 
-def normalize_tiles(
-    tiles: List[Dict[str, str]],
-    *,
-    fetch_missing_previews: bool = False,
-) -> List[Dict[str, str]]:
+def enqueue_preview_fetch(url: str, filename: str) -> None:
+    preview_path = PREVIEW_DIR / filename
+    if preview_path.exists():
+        return
+    with PREVIEW_LOCK:
+        if filename in PREVIEW_PENDING:
+            return
+        PREVIEW_PENDING.add(filename)
+    PREVIEW_FETCH_QUEUE.put((url, filename))
+
+
+def preview_worker() -> None:
+    while True:
+        url, filename = PREVIEW_FETCH_QUEUE.get()
+        try:
+            preview_path = PREVIEW_DIR / filename
+            if not preview_path.exists():
+                try:
+                    fetch_preview(url, preview_path)
+                except requests.RequestException:
+                    pass
+        finally:
+            with PREVIEW_LOCK:
+                PREVIEW_PENDING.discard(filename)
+            PREVIEW_FETCH_QUEUE.task_done()
+
+
+def start_preview_worker() -> None:
+    global PREVIEW_WORKER_STARTED
+    if PREVIEW_WORKER_STARTED:
+        return
+    PREVIEW_WORKER_STARTED = True
+    thread = threading.Thread(target=preview_worker, daemon=True)
+    thread.start()
+
+
+def normalize_tiles(tiles: List[Dict[str, str]]) -> List[Dict[str, str]]:
     normalized = []
     for tile in tiles:
         title = tile.get("title", "").strip()
@@ -110,12 +148,7 @@ def normalize_tiles(
             continue
         raw_preview = tile.get("preview") or ""
         filename = Path(raw_preview).name if raw_preview else preview_filename(url)
-        preview_path = PREVIEW_DIR / filename
-        if fetch_missing_previews and not preview_path.exists():
-            try:
-                fetch_preview(url, preview_path)
-            except requests.RequestException:
-                pass
+        enqueue_preview_fetch(url, filename)
         normalized.append({"title": title, "url": url, "preview": filename})
     return normalized
 
@@ -281,7 +314,7 @@ def load_config() -> Dict[str, Any]:
     if not isinstance(tile_refresh_hours, (int, float)) or tile_refresh_hours <= 0:
         tile_refresh_hours = DEFAULT_TILE_REFRESH_HOURS
     data = {
-        "tiles": normalize_tiles(data.get("tiles", []), fetch_missing_previews=False),
+        "tiles": normalize_tiles(data.get("tiles", [])),
         "devices": data.get("devices", []),
         "services": data.get("services", []),
         "tile_refresh_hours": tile_refresh_hours,
@@ -547,7 +580,20 @@ def load_status_history(limit: int) -> List[Dict[str, Any]]:
 
 @app.route("/previews/<path:filename>")
 def previews(filename: str):
-    return send_from_directory(PREVIEW_DIR, filename)
+    preview_name = Path(filename).name
+    preview_path = PREVIEW_DIR / preview_name
+    if preview_path.exists():
+        return send_from_directory(PREVIEW_DIR, preview_name)
+
+    config = read_config_raw()
+    for tile in config.get("tiles", []):
+        url = str(tile.get("url", "") or "").strip()
+        raw_preview = str(tile.get("preview", "") or "").strip()
+        tile_preview = Path(raw_preview).name if raw_preview else preview_filename(url)
+        if tile_preview == preview_name and url:
+            enqueue_preview_fetch(url, preview_name)
+            break
+    return send_from_directory(app.static_folder or "static", PLACEHOLDER_PREVIEW)
 
 
 @app.route("/api/config", methods=["GET", "POST"])
@@ -568,7 +614,7 @@ def config():
         return jsonify({"message": "Invalid configuration", "errors": errors}), 400
 
     updated = {
-        "tiles": normalize_tiles(validated_tiles, fetch_missing_previews=True),
+        "tiles": normalize_tiles(validated_tiles),
         "devices": validated_devices,
         "services": validated_services,
         "tile_refresh_hours": current.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS),
@@ -597,8 +643,10 @@ def status_history():
 @app.before_request
 def ensure_scheduler_started() -> None:
     start_status_scheduler()
+    start_preview_worker()
 
 
 if __name__ == "__main__":
     start_status_scheduler()
+    start_preview_worker()
     app.run(host="0.0.0.0", port=5000, debug=True)
