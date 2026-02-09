@@ -67,6 +67,8 @@ const ALERT_CHANNELS = ["email", "webhook", "ntfy", "slack", "discord"];
 const thumbnailUrl = (tile) =>
   tile.preview || `https://image.thum.io/get/width/800/${encodeURIComponent(tile.url)}`;
 
+const tileDisplayTitle = (tile) => tile.display_title?.trim() || tile.title;
+
 const tileDragState = {
   dragIndex: null,
 };
@@ -149,6 +151,29 @@ const makeTileDraggable = (tileEl, index) => {
   });
 };
 
+const refreshTileMetadata = async (index = null) => {
+  try {
+    const response = await fetch("/api/tiles/metadata", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(index === null ? {} : { index }),
+    });
+    if (!response.ok) {
+      throw new Error(`Metadata refresh failed with status ${response.status}`);
+    }
+    const payload = await response.json();
+    if (payload?.config?.tiles) {
+      state.tiles = payload.config.tiles;
+      renderTiles();
+    }
+    if (Array.isArray(payload?.failures) && payload.failures.length) {
+      console.warn("Some metadata fetches failed", payload.failures);
+    }
+  } catch (error) {
+    console.error("Failed to refresh tile metadata", error);
+  }
+};
+
 const renderTiles = () => {
   if (tileGroupsContainer) {
     tileGroupsContainer.innerHTML = "";
@@ -181,6 +206,18 @@ const renderTiles = () => {
     entries.forEach(({ tile, index }) => {
       const tileEl = document.createElement("article");
       tileEl.className = "tile";
+      const refreshButton = document.createElement("button");
+      refreshButton.type = "button";
+      refreshButton.className = "tile-refresh";
+      refreshButton.textContent = "↻";
+      refreshButton.title = "Refresh metadata";
+      refreshButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        refreshTileMetadata(index);
+      });
+      tileEl.appendChild(refreshButton);
+
       if (tile.pinned) {
         tileEl.classList.add("tile-pinned");
       }
@@ -192,16 +229,33 @@ const renderTiles = () => {
 
       const label = document.createElement("div");
       label.className = "tile-title";
-      label.textContent = tile.title;
+      const titleText = tileDisplayTitle(tile);
+      label.textContent = titleText;
 
       const link = document.createElement("a");
       link.href = tile.url;
       link.target = "_blank";
       link.rel = "noreferrer";
-      link.ariaLabel = `Open ${tile.title}`;
+      link.ariaLabel = `Open ${titleText}`;
 
       tileEl.appendChild(img);
-      tileEl.appendChild(label);
+
+      const meta = document.createElement("div");
+      meta.className = "tile-meta";
+      if (tile.favicon) {
+        const icon = document.createElement("img");
+        icon.className = "tile-favicon";
+        icon.src = tile.favicon;
+        icon.alt = "";
+        icon.loading = "lazy";
+        icon.referrerPolicy = "no-referrer";
+        icon.addEventListener("error", () => {
+          icon.style.display = "none";
+        });
+        meta.appendChild(icon);
+      }
+      meta.appendChild(label);
+      tileEl.appendChild(meta);
       if (tile.pinned) {
         const pin = document.createElement("span");
         pin.className = "tile-pin";
@@ -706,3 +760,10 @@ editor.addEventListener("click", (event) => {
 });
 editorSave.addEventListener("click", saveEditor);
 editorText.addEventListener("input", clearEditorErrors);
+
+const refreshMetadataButton = document.getElementById("refresh-metadata");
+if (refreshMetadataButton) {
+  refreshMetadataButton.addEventListener("click", () => {
+    refreshTileMetadata();
+  });
+}

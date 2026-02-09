@@ -92,6 +92,45 @@ body {
   transform: translateY(-1px);
 }
 
+.tile-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.tile-meta {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 90px);
+}
+
+.tile-favicon {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: rgba(15, 17, 23, 0.85);
+  padding: 2px;
+}
+
+.tile-refresh {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 3;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(15, 17, 23, 0.8);
+  color: var(--text);
+  cursor: pointer;
+}
+
+
 .tile-groups {
   display: flex;
   flex-direction: column;
@@ -145,15 +184,14 @@ body {
 }
 
 .tile-title {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 1;
   background: rgba(15, 17, 23, 0.85);
   padding: 6px 10px;
   border-radius: 999px;
   font-size: 0.85rem;
   font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tile a {
