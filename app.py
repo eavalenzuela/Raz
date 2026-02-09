@@ -5,6 +5,7 @@ import json
 import subprocess
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -93,7 +94,11 @@ def fetch_preview(url: str, destination: Path) -> None:
     destination.write_bytes(response.content)
 
 
-def normalize_tiles(tiles: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def normalize_tiles(
+    tiles: List[Dict[str, str]],
+    *,
+    fetch_missing_previews: bool = False,
+) -> List[Dict[str, str]]:
     normalized = []
     for tile in tiles:
         title = tile.get("title", "").strip()
@@ -103,7 +108,7 @@ def normalize_tiles(tiles: List[Dict[str, str]]) -> List[Dict[str, str]]:
         raw_preview = tile.get("preview") or ""
         filename = Path(raw_preview).name if raw_preview else preview_filename(url)
         preview_path = PREVIEW_DIR / filename
-        if not preview_path.exists():
+        if fetch_missing_previews and not preview_path.exists():
             try:
                 fetch_preview(url, preview_path)
             except requests.RequestException:
@@ -112,18 +117,28 @@ def normalize_tiles(tiles: List[Dict[str, str]]) -> List[Dict[str, str]]:
     return normalized
 
 
-def load_config() -> Dict[str, Any]:
+def read_config_raw() -> Dict[str, Any]:
     ensure_directories()
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
     else:
-        data = DEFAULT_CONFIG
+        data = deepcopy(DEFAULT_CONFIG)
+    return {
+        "tiles": data.get("tiles", []),
+        "devices": data.get("devices", []),
+        "services": data.get("services", []),
+        "tile_refresh_hours": data.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS),
+    }
+
+
+def load_config() -> Dict[str, Any]:
+    data = read_config_raw()
     tile_refresh_hours = data.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS)
     if not isinstance(tile_refresh_hours, (int, float)) or tile_refresh_hours <= 0:
         tile_refresh_hours = DEFAULT_TILE_REFRESH_HOURS
     data = {
-        "tiles": normalize_tiles(data.get("tiles", [])),
+        "tiles": normalize_tiles(data.get("tiles", []), fetch_missing_previews=False),
         "devices": data.get("devices", []),
         "services": data.get("services", []),
         "tile_refresh_hours": tile_refresh_hours,
@@ -269,7 +284,7 @@ def build_status_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def update_status_cache() -> None:
-    config = load_config()
+    config = read_config_raw()
     snapshot = build_status_snapshot(config)
     checked_at = time.time()
     with STATUS_LOCK:
@@ -383,7 +398,7 @@ def config():
     devices = payload.get("devices", current["devices"])
     services = payload.get("services", current["services"])
     updated = {
-        "tiles": normalize_tiles(tiles),
+        "tiles": normalize_tiles(tiles, fetch_missing_previews=True),
         "devices": devices,
         "services": services,
         "tile_refresh_hours": current.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS),
