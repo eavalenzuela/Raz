@@ -88,7 +88,7 @@ const renderStatusList = (container, items, keyLabel, historyMap) => {
     const info = document.createElement("div");
     info.className = "status-info";
     const title = document.createElement("strong");
-    title.textContent = item.name;
+    title.textContent = item.name || item.id || "Unnamed";
     const sub = document.createElement("span");
     sub.textContent = item[keyLabel] ?? item.url ?? "";
     info.appendChild(title);
@@ -99,7 +99,8 @@ const renderStatusList = (container, items, keyLabel, historyMap) => {
     meta.className = "status-meta-row";
     const sparkline = document.createElement("div");
     sparkline.className = "status-sparkline";
-    const history = historyMap?.get(item.name) ?? [];
+    const historyKey = item.id || item.name;
+    const history = historyKey ? historyMap?.get(historyKey) ?? [] : [];
     if (history.length) {
       history.forEach((online) => {
         const bar = document.createElement("span");
@@ -342,7 +343,8 @@ const saveEditor = async () => {
   }
 
   if (currentEdit === "devices") {
-    state.devices = normalized.map((item) => ({
+    state.devices = normalized.map((item, index) => ({
+      id: state.devices[index]?.id,
       name: item.left,
       address: item.right,
       online: false,
@@ -350,7 +352,8 @@ const saveEditor = async () => {
   }
 
   if (currentEdit === "services") {
-    state.services = parsed.map((item) => ({
+    state.services = parsed.map((item, index) => ({
+      id: state.services[index]?.id,
       name: item.name,
       url: item.url,
       method: item.method || "GET",
@@ -389,11 +392,12 @@ const buildHistoryMap = (entries, key) => {
   const map = new Map();
   entries.forEach((entry) => {
     (entry[key] || []).forEach((item) => {
-      if (!item.name) return;
-      if (!map.has(item.name)) {
-        map.set(item.name, []);
+      const historyKey = item.id || item.name;
+      if (!historyKey) return;
+      if (!map.has(historyKey)) {
+        map.set(historyKey, []);
       }
-      map.get(item.name).push(Boolean(item.online));
+      map.get(historyKey).push(Boolean(item.online));
     });
   });
   return map;

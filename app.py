@@ -8,6 +8,7 @@ import re
 import subprocess
 import threading
 import time
+import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -210,6 +211,7 @@ def _validate_devices(raw_devices: Any) -> tuple[List[Dict[str, Any]], List[Dict
             continue
         name = str(device.get("name", "") or "").strip()
         address = str(device.get("address", "") or "").strip()
+        device_id = str(device.get("id", "") or "").strip()
         if not name:
             errors.append({"section": "devices", "index": idx, "field": "name", "message": "must be non-empty"})
         if not _is_valid_host_or_ip(address):
@@ -217,7 +219,10 @@ def _validate_devices(raw_devices: Any) -> tuple[List[Dict[str, Any]], List[Dict
                 {"section": "devices", "index": idx, "field": "address", "message": "must be a valid host or IP"}
             )
         if name and _is_valid_host_or_ip(address):
-            validated.append({"name": name, "address": address})
+            normalized = {"name": name, "address": address}
+            if device_id:
+                normalized["id"] = device_id
+            validated.append(normalized)
     return validated, errors
 
 
@@ -232,6 +237,7 @@ def _validate_services(raw_services: Any) -> tuple[List[Dict[str, Any]], List[Di
             continue
         name = str(service.get("name", "") or "").strip()
         url = str(service.get("url", "") or "").strip()
+        service_id = str(service.get("id", "") or "").strip()
         method = str(service.get("method", "GET") or "GET").strip().upper() or "GET"
         timeout, timeout_valid = _parse_service_timeout(service.get("timeout"))
         expected_status, expected_status_valid = _parse_service_expected_status(service.get("expected_status"))
@@ -284,13 +290,37 @@ def _validate_services(raw_services: Any) -> tuple[List[Dict[str, Any]], List[Di
                 {
                     "name": name,
                     "url": url,
+                    "id": service_id,
                     "method": method,
                     "timeout": timeout,
                     "expected_status": expected_status,
                     "path": path,
                 }
             )
+            if not service_id:
+                validated[-1].pop("id")
     return validated, errors
+
+
+def generate_entry_id() -> str:
+    return uuid.uuid4().hex
+
+
+def with_persistent_ids(entries: Any) -> List[Dict[str, Any]]:
+    if not isinstance(entries, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        item = dict(entry)
+        raw_id = str(item.get("id", "") or "").strip()
+        entry_id = raw_id if raw_id and raw_id not in seen_ids else generate_entry_id()
+        item["id"] = entry_id
+        seen_ids.add(entry_id)
+        normalized.append(item)
+    return normalized
 
 
 def read_config_raw() -> Dict[str, Any]:
@@ -302,8 +332,8 @@ def read_config_raw() -> Dict[str, Any]:
         data = deepcopy(DEFAULT_CONFIG)
     return {
         "tiles": data.get("tiles", []),
-        "devices": data.get("devices", []),
-        "services": data.get("services", []),
+        "devices": with_persistent_ids(data.get("devices", [])),
+        "services": with_persistent_ids(data.get("services", [])),
         "tile_refresh_hours": data.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS),
     }
 
@@ -325,6 +355,11 @@ def load_config() -> Dict[str, Any]:
 
 def save_config(config: Dict[str, Any]) -> None:
     ensure_directories()
+    config = {
+        **config,
+        "devices": with_persistent_ids(config.get("devices", [])),
+        "services": with_persistent_ids(config.get("services", [])),
+    }
     with CONFIG_PATH.open("w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
 
@@ -455,7 +490,12 @@ def check_service(service: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_status_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
     device_statuses = [
-        {"name": device["name"], "address": device["address"], "online": ping_device(device["address"])}
+        {
+            "id": device.get("id", ""),
+            "name": device["name"],
+            "address": device["address"],
+            "online": ping_device(device["address"]),
+        }
         for device in config["devices"]
     ]
     service_statuses = []
@@ -463,6 +503,7 @@ def build_status_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
         result = check_service(service)
         service_statuses.append(
             {
+                "id": service.get("id", ""),
                 "name": service.get("name", ""),
                 "url": result["url"],
                 "check_url": result["check_url"],
