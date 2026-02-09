@@ -81,7 +81,8 @@
         <p class="editor-help">
           Enter one item per line. For tiles: <code>Title | https://example.com</code>.
           For devices: <code>Name | 192.168.1.2</code>. For services:
-          <code>Name | https://... | GET | 2 | 200 | /health</code>.
+          <code>Name | https://... | GET | 2 | 200 | /health | contains text | {"Content-Type":"application/json"} | {"$.status":"ok"}</code>.
+          The last three service fields are optional.
         </p>
         <textarea id="editor-text" rows="8"></textarea>
         <div class="editor-actions">
