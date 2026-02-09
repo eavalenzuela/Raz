@@ -254,6 +254,10 @@ def _validate_services(raw_services: Any) -> tuple[List[Dict[str, Any]], List[Di
         expected_status, expected_status_valid = _parse_service_expected_status(service.get("expected_status"))
         path_raw = service.get("path", "")
         path = str(path_raw).strip() if isinstance(path_raw, str) else None
+        contains_text_raw = service.get("contains_text", "")
+        contains_text = contains_text_raw if isinstance(contains_text_raw, str) else None
+        header_equals, header_equals_valid = _parse_header_equals(service.get("header_equals"))
+        json_path_equals, json_path_equals_valid = _parse_json_path_equals(service.get("json_path_equals"))
 
         if not name:
             errors.append({"section": "services", "index": idx, "field": "name", "message": "must be non-empty"})
@@ -288,6 +292,28 @@ def _validate_services(raw_services: Any) -> tuple[List[Dict[str, Any]], List[Di
             )
         if path is None:
             errors.append({"section": "services", "index": idx, "field": "path", "message": "must be a string"})
+        if contains_text is None:
+            errors.append(
+                {"section": "services", "index": idx, "field": "contains_text", "message": "must be a string"}
+            )
+        if not header_equals_valid:
+            errors.append(
+                {
+                    "section": "services",
+                    "index": idx,
+                    "field": "header_equals",
+                    "message": "must be an object with string header names and string values",
+                }
+            )
+        if not json_path_equals_valid:
+            errors.append(
+                {
+                    "section": "services",
+                    "index": idx,
+                    "field": "json_path_equals",
+                    "message": "must be an object keyed by JSON paths",
+                }
+            )
 
         if (
             name
@@ -296,18 +322,26 @@ def _validate_services(raw_services: Any) -> tuple[List[Dict[str, Any]], List[Di
             and timeout_valid
             and expected_status_valid
             and path is not None
+            and contains_text is not None
+            and header_equals_valid
+            and json_path_equals_valid
         ):
-            validated.append(
-                {
-                    "name": name,
-                    "url": url,
-                    "id": service_id,
-                    "method": method,
-                    "timeout": timeout,
-                    "expected_status": expected_status,
-                    "path": path,
-                }
-            )
+            normalized_service: Dict[str, Any] = {
+                "name": name,
+                "url": url,
+                "id": service_id,
+                "method": method,
+                "timeout": timeout,
+                "expected_status": expected_status,
+                "path": path,
+            }
+            if contains_text:
+                normalized_service["contains_text"] = contains_text
+            if header_equals:
+                normalized_service["header_equals"] = header_equals
+            if json_path_equals:
+                normalized_service["json_path_equals"] = json_path_equals
+            validated.append(normalized_service)
             if not service_id:
                 validated[-1].pop("id")
     return validated, errors
@@ -615,11 +649,85 @@ def _parse_service_expected_status(raw_status: Any) -> tuple[int, bool]:
     return status, 100 <= status <= 599
 
 
+def _parse_header_equals(raw_headers: Any) -> tuple[Dict[str, str], bool]:
+    if raw_headers is None:
+        return {}, True
+    if not isinstance(raw_headers, dict):
+        return {}, False
+    parsed: Dict[str, str] = {}
+    for key, value in raw_headers.items():
+        if not isinstance(key, str) or not key.strip() or not isinstance(value, str):
+            return {}, False
+        parsed[key.strip()] = value
+    return parsed, True
+
+
+def _parse_json_path_equals(raw_json_rules: Any) -> tuple[Dict[str, Any], bool]:
+    if raw_json_rules is None:
+        return {}, True
+    if not isinstance(raw_json_rules, dict):
+        return {}, False
+    parsed: Dict[str, Any] = {}
+    for key, value in raw_json_rules.items():
+        if not isinstance(key, str) or not key.strip():
+            return {}, False
+        parsed[key.strip()] = value
+    return parsed, True
+
+
+def _extract_json_path(payload: Any, path: str) -> tuple[bool, Any]:
+    normalized = path.strip()
+    if normalized.startswith("$"):
+        normalized = normalized[1:]
+    if normalized.startswith("."):
+        normalized = normalized[1:]
+    if not normalized:
+        return True, payload
+
+    cursor = payload
+    for segment in normalized.split("."):
+        if not segment:
+            return False, None
+        remaining = segment
+        while remaining:
+            bracket_index = remaining.find("[")
+            if bracket_index == -1:
+                key = remaining
+                if key:
+                    if not isinstance(cursor, dict) or key not in cursor:
+                        return False, None
+                    cursor = cursor[key]
+                remaining = ""
+                continue
+
+            key = remaining[:bracket_index]
+            if key:
+                if not isinstance(cursor, dict) or key not in cursor:
+                    return False, None
+                cursor = cursor[key]
+
+            close_index = remaining.find("]", bracket_index)
+            if close_index == -1:
+                return False, None
+            index_raw = remaining[bracket_index + 1 : close_index].strip()
+            if not index_raw.isdigit() or not isinstance(cursor, list):
+                return False, None
+            index = int(index_raw)
+            if index < 0 or index >= len(cursor):
+                return False, None
+            cursor = cursor[index]
+            remaining = remaining[close_index + 1 :]
+    return True, cursor
+
+
 def build_service_check(service: Dict[str, Any]) -> Dict[str, Any]:
     method = str(service.get("method", "GET") or "GET").strip().upper() or "GET"
     timeout = _service_timeout(service.get("timeout", 2))
     expected_status = _service_expected_status(service.get("expected_status", 200))
     path = str(service.get("path", "") or "").strip()
+    contains_text = str(service.get("contains_text", "") or "")
+    header_equals, _ = _parse_header_equals(service.get("header_equals"))
+    json_path_equals, _ = _parse_json_path_equals(service.get("json_path_equals"))
     url = str(service.get("url", "") or "").strip()
     check_url = urljoin(f"{url.rstrip('/')}/", path.lstrip("/")) if path else url
     return {
@@ -627,6 +735,9 @@ def build_service_check(service: Dict[str, Any]) -> Dict[str, Any]:
         "timeout": timeout,
         "expected_status": expected_status,
         "path": path,
+        "contains_text": contains_text,
+        "header_equals": header_equals,
+        "json_path_equals": json_path_equals,
         "check_url": check_url,
         "url": url,
     }
@@ -638,12 +749,46 @@ def check_service(service: Dict[str, Any]) -> Dict[str, Any]:
     try:
         response = requests.request(settings["method"], settings["check_url"], timeout=settings["timeout"])
         elapsed_ms = (time.perf_counter() - started) * 1000
-        online = response.status_code == settings["expected_status"]
+        failures: List[str] = []
+        if response.status_code != settings["expected_status"]:
+            failures.append(
+                f"status_code expected {settings['expected_status']} got {response.status_code}"
+            )
+
+        contains_text = settings.get("contains_text", "")
+        if contains_text and contains_text not in response.text:
+            failures.append(f"contains_text '{contains_text}' not found in response body")
+
+        for header_name, expected_value in settings.get("header_equals", {}).items():
+            actual_value = response.headers.get(header_name)
+            if actual_value != expected_value:
+                failures.append(
+                    f"header_equals {header_name} expected '{expected_value}' got '{actual_value}'"
+                )
+
+        json_path_equals = settings.get("json_path_equals", {})
+        if json_path_equals:
+            try:
+                json_payload = response.json()
+                for json_path, expected_value in json_path_equals.items():
+                    found, actual_value = _extract_json_path(json_payload, json_path)
+                    if not found:
+                        failures.append(f"json_path_equals path '{json_path}' not found")
+                        continue
+                    if actual_value != expected_value:
+                        failures.append(
+                            f"json_path_equals {json_path} expected {expected_value!r} got {actual_value!r}"
+                        )
+            except ValueError:
+                failures.append("json_path_equals requires a JSON response body")
+
+        online = not failures
         return {
             **settings,
             "status_code": response.status_code,
             "response_time_ms": round(elapsed_ms, 2),
             "online": online,
+            "error": "; ".join(failures) if failures else None,
         }
     except requests.RequestException as exc:
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -679,6 +824,9 @@ def build_status_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
                 "timeout": result["timeout"],
                 "expected_status": result["expected_status"],
                 "path": result["path"],
+                "contains_text": result.get("contains_text", ""),
+                "header_equals": result.get("header_equals", {}),
+                "json_path_equals": result.get("json_path_equals", {}),
                 "status_code": result["status_code"],
                 "response_time_ms": result["response_time_ms"],
                 "online": result["online"],

@@ -171,8 +171,21 @@ const renderStatusMeta = ({ last_checked: lastChecked, stale }) => {
   servicesContainer.classList.toggle("status-stale", Boolean(stale));
 };
 
+const stringifyRuleMap = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).length) return "";
+  return JSON.stringify(value);
+};
+
 const formatServiceLine = (service) => {
-  const extras = [service.method ? service.method.toUpperCase() : "", service.timeout ?? "", service.expected_status ?? "", service.path ?? ""].map((value) =>
+  const extras = [
+    service.method ? service.method.toUpperCase() : "",
+    service.timeout ?? "",
+    service.expected_status ?? "",
+    service.path ?? "",
+    service.contains_text ?? "",
+    stringifyRuleMap(service.header_equals),
+    stringifyRuleMap(service.json_path_equals),
+  ].map((value) =>
     value === null || value === undefined ? "" : String(value).trim()
   );
   const parts = [service.name ?? "", service.url ?? "", ...extras].map((value) => String(value).trim());
@@ -331,8 +344,43 @@ const validateLines = (target, lines) => {
       if (statusRaw && (!Number.isInteger(expectedStatus) || expectedStatus < 100 || expectedStatus > 599)) {
         errors.push(`Line ${lineNumber}: expected status must be a valid HTTP code.`);
       }
-      const path = parts.slice(5).join("|").trim();
-      parsed.push({ name, url, method, timeout, expectedStatus, path });
+      const path = parts[5] || "";
+      const containsText = parts[6] || "";
+
+      let headerEquals = null;
+      const headerRaw = parts[7] || "";
+      if (headerRaw) {
+        try {
+          headerEquals = JSON.parse(headerRaw);
+        } catch {
+          errors.push(`Line ${lineNumber}: header_equals must be valid JSON.`);
+        }
+        if (headerEquals !== null && (typeof headerEquals !== "object" || Array.isArray(headerEquals))) {
+          errors.push(`Line ${lineNumber}: header_equals must be a JSON object.`);
+        } else if (headerEquals !== null) {
+          const invalidEntry = Object.entries(headerEquals).find(
+            ([key, value]) => !key.trim() || typeof value !== "string"
+          );
+          if (invalidEntry) {
+            errors.push(`Line ${lineNumber}: header_equals values must be strings.`);
+          }
+        }
+      }
+
+      let jsonPathEquals = null;
+      const jsonPathRaw = parts.slice(8).join("|").trim();
+      if (jsonPathRaw) {
+        try {
+          jsonPathEquals = JSON.parse(jsonPathRaw);
+        } catch {
+          errors.push(`Line ${lineNumber}: json_path_equals must be valid JSON.`);
+        }
+        if (jsonPathEquals !== null && (typeof jsonPathEquals !== "object" || Array.isArray(jsonPathEquals))) {
+          errors.push(`Line ${lineNumber}: json_path_equals must be a JSON object.`);
+        }
+      }
+
+      parsed.push({ name, url, method, timeout, expectedStatus, path, containsText, headerEquals, jsonPathEquals });
       return;
     }
 
@@ -385,6 +433,9 @@ const saveEditor = async () => {
       timeout: item.timeout ?? 2,
       expected_status: item.expectedStatus ?? 200,
       path: item.path || "",
+      contains_text: item.containsText || "",
+      ...(item.headerEquals && Object.keys(item.headerEquals).length ? { header_equals: item.headerEquals } : {}),
+      ...(item.jsonPathEquals && Object.keys(item.jsonPathEquals).length ? { json_path_equals: item.jsonPathEquals } : {}),
       online: false,
     }));
   }
