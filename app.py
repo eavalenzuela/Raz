@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
+import re
 import subprocess
 import threading
 import time
@@ -9,7 +11,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from flask import Flask, jsonify, render_template, request, send_from_directory
@@ -25,6 +27,7 @@ STATUS_REFRESH_SECONDS = 20
 STATUS_STALE_SECONDS = 60
 STATUS_HISTORY_LIMIT = 240
 DEFAULT_TILE_REFRESH_HOURS = 6
+ALLOWED_SERVICE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 
 STATUS_LOCK = threading.Lock()
 STATUS_CACHE: Dict[str, Any] = {
@@ -115,6 +118,146 @@ def normalize_tiles(
                 pass
         normalized.append({"title": title, "url": url, "preview": filename})
     return normalized
+
+
+def _is_valid_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _is_valid_host_or_ip(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    host = value.strip()
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    hostname_pattern = re.compile(
+        r"^(?=.{1,253}$)(?:(?!-)[A-Za-z0-9-]{1,63}(?<!-)\\.)*(?!-)[A-Za-z0-9-]{1,63}(?<!-)$"
+    )
+    return bool(hostname_pattern.match(host))
+
+
+def _validate_tiles(raw_tiles: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not isinstance(raw_tiles, list):
+        return [], [{"section": "tiles", "message": "must be a list"}]
+    validated: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for idx, tile in enumerate(raw_tiles):
+        if not isinstance(tile, dict):
+            errors.append({"section": "tiles", "index": idx, "message": "must be an object"})
+            continue
+        title = str(tile.get("title", "") or "").strip()
+        url = str(tile.get("url", "") or "").strip()
+        if not title:
+            errors.append({"section": "tiles", "index": idx, "field": "title", "message": "must be non-empty"})
+        if not _is_valid_url(url):
+            errors.append(
+                {"section": "tiles", "index": idx, "field": "url", "message": "must be a valid http/https URL"}
+            )
+        if title and _is_valid_url(url):
+            validated.append({"title": title, "url": url, "preview": tile.get("preview", "")})
+    return validated, errors
+
+
+def _validate_devices(raw_devices: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not isinstance(raw_devices, list):
+        return [], [{"section": "devices", "message": "must be a list"}]
+    validated: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for idx, device in enumerate(raw_devices):
+        if not isinstance(device, dict):
+            errors.append({"section": "devices", "index": idx, "message": "must be an object"})
+            continue
+        name = str(device.get("name", "") or "").strip()
+        address = str(device.get("address", "") or "").strip()
+        if not name:
+            errors.append({"section": "devices", "index": idx, "field": "name", "message": "must be non-empty"})
+        if not _is_valid_host_or_ip(address):
+            errors.append(
+                {"section": "devices", "index": idx, "field": "address", "message": "must be a valid host or IP"}
+            )
+        if name and _is_valid_host_or_ip(address):
+            validated.append({"name": name, "address": address})
+    return validated, errors
+
+
+def _validate_services(raw_services: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not isinstance(raw_services, list):
+        return [], [{"section": "services", "message": "must be a list"}]
+    validated: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for idx, service in enumerate(raw_services):
+        if not isinstance(service, dict):
+            errors.append({"section": "services", "index": idx, "message": "must be an object"})
+            continue
+        name = str(service.get("name", "") or "").strip()
+        url = str(service.get("url", "") or "").strip()
+        method = str(service.get("method", "GET") or "GET").strip().upper() or "GET"
+        timeout, timeout_valid = _parse_service_timeout(service.get("timeout"))
+        expected_status, expected_status_valid = _parse_service_expected_status(service.get("expected_status"))
+        path_raw = service.get("path", "")
+        path = str(path_raw).strip() if isinstance(path_raw, str) else None
+
+        if not name:
+            errors.append({"section": "services", "index": idx, "field": "name", "message": "must be non-empty"})
+        if not _is_valid_url(url):
+            errors.append(
+                {
+                    "section": "services",
+                    "index": idx,
+                    "field": "url",
+                    "message": "must be a valid http/https URL",
+                }
+            )
+        if method not in ALLOWED_SERVICE_METHODS:
+            errors.append(
+                {
+                    "section": "services",
+                    "index": idx,
+                    "field": "method",
+                    "message": f"must be one of {sorted(ALLOWED_SERVICE_METHODS)}",
+                }
+            )
+        if not timeout_valid:
+            errors.append({"section": "services", "index": idx, "field": "timeout", "message": "must be > 0"})
+        if not expected_status_valid:
+            errors.append(
+                {
+                    "section": "services",
+                    "index": idx,
+                    "field": "expected_status",
+                    "message": "must be between 100 and 599",
+                }
+            )
+        if path is None:
+            errors.append({"section": "services", "index": idx, "field": "path", "message": "must be a string"})
+
+        if (
+            name
+            and _is_valid_url(url)
+            and method in ALLOWED_SERVICE_METHODS
+            and timeout_valid
+            and expected_status_valid
+            and path is not None
+        ):
+            validated.append(
+                {
+                    "name": name,
+                    "url": url,
+                    "method": method,
+                    "timeout": timeout,
+                    "expected_status": expected_status,
+                    "path": path,
+                }
+            )
+    return validated, errors
 
 
 def read_config_raw() -> Dict[str, Any]:
@@ -214,6 +357,26 @@ def _service_expected_status(raw_status: Any) -> int:
     except (TypeError, ValueError):
         pass
     return 200
+
+
+def _parse_service_timeout(raw_timeout: Any) -> tuple[float, bool]:
+    if raw_timeout is None:
+        return 2.0, True
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        return 2.0, False
+    return timeout, timeout > 0
+
+
+def _parse_service_expected_status(raw_status: Any) -> tuple[int, bool]:
+    if raw_status is None:
+        return 200, True
+    try:
+        status = int(raw_status)
+    except (TypeError, ValueError):
+        return 200, False
+    return status, 100 <= status <= 599
 
 
 def build_service_check(service: Dict[str, Any]) -> Dict[str, Any]:
@@ -397,10 +560,17 @@ def config():
     tiles = payload.get("tiles", current["tiles"])
     devices = payload.get("devices", current["devices"])
     services = payload.get("services", current["services"])
+    validated_tiles, tile_errors = _validate_tiles(tiles)
+    validated_devices, device_errors = _validate_devices(devices)
+    validated_services, service_errors = _validate_services(services)
+    errors = tile_errors + device_errors + service_errors
+    if errors:
+        return jsonify({"message": "Invalid configuration", "errors": errors}), 400
+
     updated = {
-        "tiles": normalize_tiles(tiles, fetch_missing_previews=True),
-        "devices": devices,
-        "services": services,
+        "tiles": normalize_tiles(validated_tiles, fetch_missing_previews=True),
+        "devices": validated_devices,
+        "services": validated_services,
         "tile_refresh_hours": current.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS),
     }
     save_config(updated)
