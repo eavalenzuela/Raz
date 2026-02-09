@@ -10,6 +10,7 @@
         tiles: {{ tiles_json | safe }},
         devices: {{ devices_json | safe }},
         services: {{ services_json | safe }},
+        alerts: {{ alerts_json | safe }},
         tile_refresh_hours: {{ tile_refresh_hours | tojson }},
       };
     </script>
@@ -56,6 +57,18 @@
             </button>
           </header>
           <div id="services" class="status-list"></div>
+        </section>
+
+        <section class="pane pane-d">
+          <header class="pane-header">
+            <div>
+              <h2>Alerts</h2>
+              <p class="subtitle">Transition notifications and targets.</p>
+            </div>
+            <button class="edit-button" data-edit="alerts" aria-label="Edit alerts">
+              ✎
+            </button>
+          </header>
         </section>
       </aside>
     </main>

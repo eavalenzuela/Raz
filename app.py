@@ -29,7 +29,9 @@ STATUS_REFRESH_SECONDS = 20
 STATUS_STALE_SECONDS = 60
 STATUS_HISTORY_LIMIT = 240
 DEFAULT_TILE_REFRESH_HOURS = 6
+DEFAULT_ALERT_DEBOUNCE_SECONDS = 300
 ALLOWED_SERVICE_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+ALERT_CHANNELS = ("email", "webhook", "ntfy", "slack", "discord")
 
 STATUS_LOCK = threading.Lock()
 STATUS_CACHE: Dict[str, Any] = {
@@ -43,6 +45,7 @@ PREVIEW_PENDING: set[str] = set()
 PREVIEW_LOCK = threading.Lock()
 PREVIEW_WORKER_STARTED = False
 PLACEHOLDER_PREVIEW = "preview-placeholder.svg"
+ALERT_LAST_EMITTED: Dict[str, float] = {}
 
 
 DEFAULT_CONFIG: Dict[str, List[Dict[str, Any]]] = {
@@ -84,6 +87,14 @@ DEFAULT_CONFIG: Dict[str, List[Dict[str, Any]]] = {
         },
     ],
     "tile_refresh_hours": DEFAULT_TILE_REFRESH_HOURS,
+    "alerts": {
+        "debounce_seconds": DEFAULT_ALERT_DEBOUNCE_SECONDS,
+        "email": {"enabled": False, "target": ""},
+        "webhook": {"enabled": False, "target": ""},
+        "ntfy": {"enabled": False, "target": ""},
+        "slack": {"enabled": False, "target": ""},
+        "discord": {"enabled": False, "target": ""},
+    },
 }
 
 
@@ -302,6 +313,63 @@ def _validate_services(raw_services: Any) -> tuple[List[Dict[str, Any]], List[Di
     return validated, errors
 
 
+def _default_alerts() -> Dict[str, Any]:
+    return deepcopy(DEFAULT_CONFIG["alerts"])
+
+
+def normalize_alerts(raw_alerts: Any) -> Dict[str, Any]:
+    alerts = _default_alerts()
+    if not isinstance(raw_alerts, dict):
+        return alerts
+    try:
+        debounce_seconds = int(raw_alerts.get("debounce_seconds", DEFAULT_ALERT_DEBOUNCE_SECONDS))
+        alerts["debounce_seconds"] = debounce_seconds if debounce_seconds >= 0 else DEFAULT_ALERT_DEBOUNCE_SECONDS
+    except (TypeError, ValueError):
+        alerts["debounce_seconds"] = DEFAULT_ALERT_DEBOUNCE_SECONDS
+
+    for channel in ALERT_CHANNELS:
+        channel_raw = raw_alerts.get(channel, {})
+        if isinstance(channel_raw, dict):
+            alerts[channel] = {
+                "enabled": bool(channel_raw.get("enabled", False)),
+                "target": str(channel_raw.get("target", "") or "").strip(),
+            }
+    return alerts
+
+
+def _validate_alerts(raw_alerts: Any) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    if raw_alerts is None:
+        return _default_alerts(), []
+    if not isinstance(raw_alerts, dict):
+        return _default_alerts(), [{"section": "alerts", "message": "must be an object"}]
+    errors: List[Dict[str, Any]] = []
+    alerts = normalize_alerts(raw_alerts)
+    try:
+        debounce = int(raw_alerts.get("debounce_seconds", DEFAULT_ALERT_DEBOUNCE_SECONDS))
+        if debounce < 0:
+            errors.append(
+                {"section": "alerts", "field": "debounce_seconds", "message": "must be >= 0"}
+            )
+    except (TypeError, ValueError):
+        errors.append({"section": "alerts", "field": "debounce_seconds", "message": "must be an integer"})
+
+    for channel in ALERT_CHANNELS:
+        channel_raw = raw_alerts.get(channel, {})
+        if not isinstance(channel_raw, dict):
+            errors.append({"section": "alerts", "field": channel, "message": "must be an object"})
+            continue
+        target = channel_raw.get("target", "")
+        if target is not None and not isinstance(target, str):
+            errors.append(
+                {
+                    "section": "alerts",
+                    "field": f"{channel}.target",
+                    "message": "must be a string",
+                }
+            )
+    return alerts, errors
+
+
 def generate_entry_id() -> str:
     return uuid.uuid4().hex
 
@@ -335,6 +403,7 @@ def read_config_raw() -> Dict[str, Any]:
         "devices": with_persistent_ids(data.get("devices", [])),
         "services": with_persistent_ids(data.get("services", [])),
         "tile_refresh_hours": data.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS),
+        "alerts": normalize_alerts(data.get("alerts")),
     }
 
 
@@ -348,6 +417,7 @@ def load_config() -> Dict[str, Any]:
         "devices": data.get("devices", []),
         "services": data.get("services", []),
         "tile_refresh_hours": tile_refresh_hours,
+        "alerts": normalize_alerts(data.get("alerts")),
     }
     save_config(data)
     return data
@@ -377,6 +447,7 @@ def serialize_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "devices": config.get("devices", []),
         "services": config.get("services", []),
         "tile_refresh_hours": config.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS),
+        "alerts": normalize_alerts(config.get("alerts")),
     }
 
 
@@ -387,13 +458,110 @@ def index() -> str:
     devices = config["devices"]
     services = config["services"]
     tile_refresh_hours = config["tile_refresh_hours"]
+    alerts = config["alerts"]
     return render_template(
         "index.html",
         tiles_json=json.dumps(tiles),
         devices_json=json.dumps(devices),
         services_json=json.dumps(services),
         tile_refresh_hours=tile_refresh_hours,
+        alerts_json=json.dumps(alerts),
     )
+
+
+def _load_previous_snapshot() -> Optional[Dict[str, Any]]:
+    entries = load_status_history(1)
+    if not entries:
+        return None
+    return entries[-1]
+
+
+def _extract_status_map(snapshot: Optional[Dict[str, Any]], key: str) -> Dict[str, bool]:
+    if not snapshot:
+        return {}
+    status_map: Dict[str, bool] = {}
+    for item in snapshot.get(key, []):
+        item_key = str(item.get("id") or item.get("name") or "").strip()
+        if not item_key:
+            continue
+        status_map[item_key] = bool(item.get("online"))
+    return status_map
+
+
+def collect_transition_events(
+    previous_snapshot: Optional[Dict[str, Any]], current_snapshot: Dict[str, Any], checked_at: float
+) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    checked_iso = datetime.fromtimestamp(checked_at, tz=timezone.utc).isoformat()
+    for section in ("devices", "services"):
+        previous = _extract_status_map(previous_snapshot, section)
+        for item in current_snapshot.get(section, []):
+            item_key = str(item.get("id") or item.get("name") or "").strip()
+            if not item_key:
+                continue
+            current_online = bool(item.get("online"))
+            if item_key not in previous:
+                continue
+            previous_online = previous[item_key]
+            if previous_online == current_online:
+                continue
+            events.append(
+                {
+                    "type": "status_transition",
+                    "section": section[:-1],
+                    "id": item.get("id", ""),
+                    "name": item.get("name", ""),
+                    "from_online": previous_online,
+                    "to_online": current_online,
+                    "timestamp": checked_iso,
+                    "epoch": checked_at,
+                }
+            )
+    return events
+
+
+def _post_alert(channel: str, target: str, event: Dict[str, Any]) -> None:
+    text = (
+        f"[{event['timestamp']}] {event['section']} {event.get('name') or event.get('id') or 'unknown'} "
+        f"changed from {'online' if event['from_online'] else 'offline'} to {'online' if event['to_online'] else 'offline'}"
+    )
+    if channel == "webhook":
+        requests.post(target, json=event, timeout=5)
+    elif channel == "ntfy":
+        requests.post(target, data=text.encode("utf-8"), timeout=5)
+    elif channel in {"slack", "discord"}:
+        requests.post(target, json={"text": text}, timeout=5)
+    elif channel == "email":
+        app.logger.info("Alert(email) target=%s payload=%s", target, event)
+
+
+def emit_alert_events(events: List[Dict[str, Any]], alerts: Dict[str, Any]) -> None:
+    if not events:
+        return
+    debounce_seconds = int(alerts.get("debounce_seconds", DEFAULT_ALERT_DEBOUNCE_SECONDS))
+    now = time.time()
+    for event in events:
+        identity = f"{event.get('section')}:{event.get('id') or event.get('name')}:{event.get('to_online')}"
+        last_sent = ALERT_LAST_EMITTED.get(identity)
+        if last_sent is not None and now - last_sent < debounce_seconds:
+            continue
+        delivered = False
+        for channel in ALERT_CHANNELS:
+            channel_config = alerts.get(channel, {})
+            if not isinstance(channel_config, dict):
+                continue
+            if not channel_config.get("enabled"):
+                continue
+            target = str(channel_config.get("target", "") or "").strip()
+            if not target:
+                continue
+            try:
+                _post_alert(channel, target, event)
+                delivered = True
+            except requests.RequestException:
+                app.logger.warning("Alert delivery failed for %s", channel)
+        if delivered:
+            ALERT_LAST_EMITTED[identity] = now
 
 
 def ping_device(address: str) -> bool:
@@ -572,6 +740,7 @@ def status_payload() -> Dict[str, Any]:
 
 def append_status_history(snapshot: Dict[str, Any], checked_at: float) -> None:
     ensure_directories()
+    previous_snapshot = _load_previous_snapshot()
     record = {
         "timestamp": datetime.fromtimestamp(checked_at, tz=timezone.utc).isoformat(),
         "epoch": checked_at,
@@ -582,6 +751,9 @@ def append_status_history(snapshot: Dict[str, Any], checked_at: float) -> None:
         handle.write(json.dumps(record))
         handle.write("\n")
     trim_status_history(STATUS_HISTORY_LIMIT)
+    config = read_config_raw()
+    events = collect_transition_events(previous_snapshot, snapshot, checked_at)
+    emit_alert_events(events, config.get("alerts", {}))
 
 
 def trim_status_history(max_entries: int) -> None:
@@ -647,10 +819,12 @@ def config():
     tiles = payload.get("tiles", current["tiles"])
     devices = payload.get("devices", current["devices"])
     services = payload.get("services", current["services"])
+    alerts = payload.get("alerts", current.get("alerts", _default_alerts()))
     validated_tiles, tile_errors = _validate_tiles(tiles)
     validated_devices, device_errors = _validate_devices(devices)
     validated_services, service_errors = _validate_services(services)
-    errors = tile_errors + device_errors + service_errors
+    validated_alerts, alert_errors = _validate_alerts(alerts)
+    errors = tile_errors + device_errors + service_errors + alert_errors
     if errors:
         return jsonify({"message": "Invalid configuration", "errors": errors}), 400
 
@@ -659,6 +833,7 @@ def config():
         "devices": validated_devices,
         "services": validated_services,
         "tile_refresh_hours": current.get("tile_refresh_hours", DEFAULT_TILE_REFRESH_HOURS),
+        "alerts": validated_alerts,
     }
     save_config(updated)
     return jsonify(serialize_config(updated))
