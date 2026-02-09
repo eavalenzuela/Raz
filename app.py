@@ -46,6 +46,8 @@ PREVIEW_LOCK = threading.Lock()
 PREVIEW_WORKER_STARTED = False
 PLACEHOLDER_PREVIEW = "preview-placeholder.svg"
 ALERT_LAST_EMITTED: Dict[str, float] = {}
+METADATA_TIMEOUT_SECONDS = 4
+MAX_DISPLAY_TITLE_LENGTH = 120
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -164,10 +166,61 @@ def normalize_tiles(tiles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         filename = Path(raw_preview).name if raw_preview else preview_filename(url)
         enqueue_preview_fetch(url, filename)
         normalized_tile: Dict[str, Any] = {"title": title, "url": url, "preview": filename, "pinned": pinned}
+        favicon = _normalize_favicon(tile.get("favicon"))
+        display_title = _normalize_display_title(tile.get("display_title"))
         if group:
             normalized_tile["group"] = group
+        if favicon:
+            normalized_tile["favicon"] = favicon
+        if display_title:
+            normalized_tile["display_title"] = display_title
         normalized.append(normalized_tile)
     return normalized
+
+
+def _normalize_display_title(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    return cleaned[:MAX_DISPLAY_TITLE_LENGTH] if cleaned else ""
+
+
+def _normalize_favicon(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    favicon = value.strip()
+    return favicon if _is_valid_url(favicon) else ""
+
+
+def fetch_tile_metadata(url: str) -> Dict[str, str]:
+    response = requests.get(url, timeout=METADATA_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    body = response.text or ""
+
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", body, flags=re.IGNORECASE | re.DOTALL)
+    raw_title = title_match.group(1) if title_match else ""
+    display_title = _normalize_display_title(raw_title)
+
+    favicon = ""
+    icon_match = re.search(
+        r"<link[^>]+rel=[\"'][^\"']*icon[^\"']*[\"'][^>]*href=[\"']([^\"']+)[\"']",
+        body,
+        flags=re.IGNORECASE,
+    )
+    if icon_match:
+        favicon = urljoin(url, icon_match.group(1).strip())
+    else:
+        parsed = urlparse(url)
+        fallback = f"{parsed.scheme}://{parsed.netloc}/favicon.ico"
+        favicon = fallback
+    favicon = _normalize_favicon(favicon)
+
+    metadata: Dict[str, str] = {}
+    if display_title:
+        metadata["display_title"] = display_title
+    if favicon:
+        metadata["favicon"] = favicon
+    return metadata
 
 
 def _is_valid_url(value: Any) -> bool:
@@ -207,6 +260,8 @@ def _validate_tiles(raw_tiles: Any) -> tuple[List[Dict[str, Any]], List[Dict[str
         url = str(tile.get("url", "") or "").strip()
         group_raw = tile.get("group", "")
         pinned_raw = tile.get("pinned", False)
+        favicon_raw = tile.get("favicon", "")
+        display_title_raw = tile.get("display_title", "")
         group = str(group_raw).strip() if group_raw is not None else ""
         if not title:
             errors.append({"section": "tiles", "index": idx, "field": "title", "message": "must be non-empty"})
@@ -218,6 +273,16 @@ def _validate_tiles(raw_tiles: Any) -> tuple[List[Dict[str, Any]], List[Dict[str
             errors.append({"section": "tiles", "index": idx, "field": "group", "message": "must be a string"})
         if not isinstance(pinned_raw, bool):
             errors.append({"section": "tiles", "index": idx, "field": "pinned", "message": "must be a boolean"})
+        if favicon_raw is not None and not isinstance(favicon_raw, str):
+            errors.append({"section": "tiles", "index": idx, "field": "favicon", "message": "must be a string"})
+        if display_title_raw is not None and not isinstance(display_title_raw, str):
+            errors.append({"section": "tiles", "index": idx, "field": "display_title", "message": "must be a string"})
+        normalized_favicon = _normalize_favicon(favicon_raw)
+        normalized_display_title = _normalize_display_title(display_title_raw)
+        if favicon_raw and not normalized_favicon:
+            errors.append(
+                {"section": "tiles", "index": idx, "field": "favicon", "message": "must be a valid http/https URL"}
+            )
         if title and _is_valid_url(url):
             validated_tile: Dict[str, Any] = {
                 "title": title,
@@ -227,6 +292,10 @@ def _validate_tiles(raw_tiles: Any) -> tuple[List[Dict[str, Any]], List[Dict[str
             }
             if group:
                 validated_tile["group"] = group
+            if normalized_favicon:
+                validated_tile["favicon"] = normalized_favicon
+            if normalized_display_title:
+                validated_tile["display_title"] = normalized_display_title
             validated.append(validated_tile)
     return validated, errors
 
@@ -1022,6 +1091,40 @@ def status_history():
         limit = STATUS_HISTORY_LIMIT
     history = load_status_history(limit)
     return jsonify({"entries": history, "limit": limit, "count": len(history)})
+
+
+@app.route("/api/tiles/metadata", methods=["POST"])
+def refresh_tile_metadata():
+    payload = request.get_json(silent=True) or {}
+    index = payload.get("index")
+    config = load_config()
+    tiles = config.get("tiles", [])
+    targets: List[int]
+    if index is None:
+        targets = list(range(len(tiles)))
+    elif isinstance(index, int) and 0 <= index < len(tiles):
+        targets = [index]
+    else:
+        return jsonify({"message": "Invalid tile index"}), 400
+
+    updated_indices: List[int] = []
+    failures: List[Dict[str, Any]] = []
+    for tile_index in targets:
+        tile = tiles[tile_index]
+        try:
+            metadata = fetch_tile_metadata(tile["url"])
+        except requests.RequestException as exc:
+            failures.append({"index": tile_index, "url": tile.get("url", ""), "error": str(exc)})
+            continue
+
+        if metadata.get("display_title"):
+            tile["display_title"] = metadata["display_title"]
+        if metadata.get("favicon"):
+            tile["favicon"] = metadata["favicon"]
+        updated_indices.append(tile_index)
+
+    save_config(config)
+    return jsonify({"config": serialize_config(config), "updated": updated_indices, "failures": failures})
 
 
 @app.before_request

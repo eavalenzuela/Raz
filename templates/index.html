@@ -23,9 +23,10 @@
             <h2>Favorites</h2>
             <p class="subtitle">Quick links with live thumbnails.</p>
           </div>
-          <button class="edit-button" data-edit="tiles" aria-label="Edit tiles">
-            ✎
-          </button>
+          <div class="tile-actions">
+            <button id="refresh-metadata" class="edit-button" aria-label="Refresh metadata" title="Refresh metadata">↻</button>
+            <button class="edit-button" data-edit="tiles" aria-label="Edit tiles">✎</button>
+          </div>
         </header>
         <div id="tile-groups" class="tile-groups"></div>
       </section>
