@@ -352,6 +352,36 @@ body {
   display: flex;
 }
 
+
+.editor-status {
+  display: none;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 0.85rem;
+}
+
+.editor-status.active {
+  display: block;
+}
+
+.editor-status.is-info {
+  background: rgba(77, 163, 255, 0.14);
+  border: 1px solid rgba(77, 163, 255, 0.4);
+  color: #cfe5ff;
+}
+
+.editor-status.is-success {
+  background: rgba(66, 210, 124, 0.12);
+  border: 1px solid rgba(66, 210, 124, 0.45);
+  color: #b8f5d0;
+}
+
+.editor-status.is-error {
+  background: rgba(255, 93, 93, 0.12);
+  border: 1px solid rgba(255, 93, 93, 0.4);
+  color: #ffd1d1;
+}
+
 .editor-actions {
   display: flex;
   justify-content: flex-end;
