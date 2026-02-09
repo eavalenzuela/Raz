@@ -24,15 +24,18 @@
   "devices": [
     {
       "name": "Router",
-      "address": "192.168.1.1"
+      "address": "192.168.1.1",
+      "id": "db99e66e5168482cae768e559890c29f"
     },
     {
       "name": "NAS",
-      "address": "192.168.1.10"
+      "address": "192.168.1.10",
+      "id": "c9fc7ac8622f49b59987a5558f1f16b6"
     },
     {
       "name": "Desktop",
-      "address": "192.168.1.20"
+      "address": "192.168.1.20",
+      "id": "d23004d91a814fddbd66233d0a21193c"
     }
   ],
   "services": [
@@ -42,7 +45,8 @@
       "method": "GET",
       "timeout": 2,
       "expected_status": 200,
-      "path": ""
+      "path": "",
+      "id": "47508dda4b394335909d2881cc601bcf"
     },
     {
       "name": "Kavita",
@@ -50,7 +54,8 @@
       "method": "GET",
       "timeout": 2,
       "expected_status": 200,
-      "path": ""
+      "path": "",
+      "id": "7cbb02ebb33f4aa39b8314d305a8d4de"
     },
     {
       "name": "Calibre",
@@ -58,8 +63,32 @@
       "method": "GET",
       "timeout": 2,
       "expected_status": 200,
-      "path": ""
+      "path": "",
+      "id": "a91b14a3738b4a378152022b0370416a"
     }
   ],
-  "tile_refresh_hours": 6
+  "tile_refresh_hours": 6,
+  "alerts": {
+    "debounce_seconds": 300,
+    "email": {
+      "enabled": false,
+      "target": ""
+    },
+    "webhook": {
+      "enabled": false,
+      "target": ""
+    },
+    "ntfy": {
+      "enabled": false,
+      "target": ""
+    },
+    "slack": {
+      "enabled": false,
+      "target": ""
+    },
+    "discord": {
+      "enabled": false,
+      "target": ""
+    }
+  }
 }

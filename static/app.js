@@ -4,6 +4,14 @@ const state = {
   tiles: [...data.tiles],
   devices: [...data.devices],
   services: [...data.services],
+  alerts: {
+    debounce_seconds: data.alerts?.debounce_seconds ?? 300,
+    email: { ...(data.alerts?.email || { enabled: false, target: "" }) },
+    webhook: { ...(data.alerts?.webhook || { enabled: false, target: "" }) },
+    ntfy: { ...(data.alerts?.ntfy || { enabled: false, target: "" }) },
+    slack: { ...(data.alerts?.slack || { enabled: false, target: "" }) },
+    discord: { ...(data.alerts?.discord || { enabled: false, target: "" }) },
+  },
   tileRefreshHours: data.tile_refresh_hours,
   history: {
     devices: new Map(),
@@ -30,6 +38,9 @@ editorErrors.setAttribute("aria-live", "polite");
 editorText.insertAdjacentElement("afterend", editorErrors);
 
 let currentEdit = null;
+
+const VALID_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
+const ALERT_CHANNELS = ["email", "webhook", "ntfy", "slack", "discord"];
 
 const thumbnailUrl = (tile) =>
   tile.preview || `https://image.thum.io/get/width/800/${encodeURIComponent(tile.url)}`;
@@ -161,42 +172,14 @@ const renderStatusMeta = ({ last_checked: lastChecked, stale }) => {
 };
 
 const formatServiceLine = (service) => {
-  const extras = [
-    service.method ? service.method.toUpperCase() : "",
-    service.timeout ?? "",
-    service.expected_status ?? "",
-    service.path ?? "",
-  ].map((value) => (value === null || value === undefined ? "" : String(value).trim()));
+  const extras = [service.method ? service.method.toUpperCase() : "", service.timeout ?? "", service.expected_status ?? "", service.path ?? ""].map((value) =>
+    value === null || value === undefined ? "" : String(value).trim()
+  );
   const parts = [service.name ?? "", service.url ?? "", ...extras].map((value) => String(value).trim());
   while (parts.length > 2 && !parts[parts.length - 1]) {
     parts.pop();
   }
   return parts.join(" | ");
-};
-
-const openEditor = (target) => {
-  currentEdit = target;
-  editorTitle.textContent = `Edit ${target}`;
-  clearEditorErrors();
-  const items = state[target];
-  editorText.value = items
-    .map((item) => {
-      if (target === "services") {
-        return formatServiceLine(item);
-      }
-      const key = target === "devices" ? "address" : "url";
-      return `${item.name} | ${item[key]}`;
-    })
-    .join("\n");
-  editor.classList.add("active");
-  editor.setAttribute("aria-hidden", "false");
-};
-
-const closeEditor = () => {
-  editor.classList.remove("active");
-  editor.setAttribute("aria-hidden", "true");
-  currentEdit = null;
-  clearEditorErrors();
 };
 
 const clearEditorErrors = () => {
@@ -219,6 +202,38 @@ const showEditorErrors = (errors) => {
   });
   editorErrors.classList.add("active");
   editorText.classList.add("has-errors");
+};
+
+const openEditor = (target) => {
+  currentEdit = target;
+  editorTitle.textContent = `Edit ${target}`;
+  clearEditorErrors();
+  if (target === "alerts") {
+    const lines = [`debounce_seconds | ${state.alerts.debounce_seconds ?? 300}`];
+    ALERT_CHANNELS.forEach((channel) => {
+      const cfg = state.alerts[channel] || { enabled: false, target: "" };
+      lines.push(`${channel} | ${cfg.enabled ? "on" : "off"} | ${cfg.target || ""}`);
+    });
+    editorText.value = lines.join("\n");
+  } else {
+    const items = state[target];
+    editorText.value = items
+      .map((item) => {
+        if (target === "services") return formatServiceLine(item);
+        const key = target === "devices" ? "address" : "url";
+        return `${item.name} | ${item[key]}`;
+      })
+      .join("\n");
+  }
+  editor.classList.add("active");
+  editor.setAttribute("aria-hidden", "false");
+};
+
+const closeEditor = () => {
+  editor.classList.remove("active");
+  editor.setAttribute("aria-hidden", "true");
+  currentEdit = null;
+  clearEditorErrors();
 };
 
 const isValidUrl = (value) => {
@@ -252,8 +267,6 @@ const isValidHostname = (value) => {
   });
 };
 
-const VALID_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
-
 const validateLines = (target, lines) => {
   const errors = [];
   const parsed = [];
@@ -262,6 +275,32 @@ const validateLines = (target, lines) => {
     if (!trimmed) return;
     const lineNumber = index + 1;
     const parts = trimmed.split("|").map((part) => part.trim());
+
+    if (target === "alerts") {
+      const key = (parts[0] || "").toLowerCase();
+      if (key === "debounce_seconds") {
+        const value = Number(parts[1] || "");
+        if (!Number.isInteger(value) || value < 0) {
+          errors.push(`Line ${lineNumber}: debounce_seconds must be a non-negative integer.`);
+          return;
+        }
+        parsed.push({ type: "debounce", value });
+        return;
+      }
+      if (!ALERT_CHANNELS.includes(key)) {
+        errors.push(`Line ${lineNumber}: unknown alert key '${key}'.`);
+        return;
+      }
+      const enabledRaw = (parts[1] || "").toLowerCase();
+      if (!["on", "off", "true", "false", "1", "0"].includes(enabledRaw)) {
+        errors.push(`Line ${lineNumber}: enabled must be on/off.`);
+      }
+      const enabled = ["on", "true", "1"].includes(enabledRaw);
+      const targetValue = parts.slice(2).join("|").trim();
+      parsed.push({ type: "channel", channel: key, enabled, target: targetValue });
+      return;
+    }
+
     const label = target === "tiles" ? "title" : "name";
     const name = parts[0] || "";
     if (!name) {
@@ -293,14 +332,7 @@ const validateLines = (target, lines) => {
         errors.push(`Line ${lineNumber}: expected status must be a valid HTTP code.`);
       }
       const path = parts.slice(5).join("|").trim();
-      parsed.push({
-        name,
-        url,
-        method,
-        timeout,
-        expectedStatus,
-        path,
-      });
+      parsed.push({ name, url, method, timeout, expectedStatus, path });
       return;
     }
 
@@ -330,20 +362,13 @@ const saveEditor = async () => {
     return;
   }
   clearEditorErrors();
-  const normalized = parsed.map((item) => ({
-    left: item.left,
-    right: item.right,
-  }));
 
   if (currentEdit === "tiles") {
-    state.tiles = normalized.map((item) => ({
-      title: item.left,
-      url: item.right,
-    }));
+    state.tiles = parsed.map((item) => ({ title: item.left, url: item.right }));
   }
 
   if (currentEdit === "devices") {
-    state.devices = normalized.map((item, index) => ({
+    state.devices = parsed.map((item, index) => ({
       id: state.devices[index]?.id,
       name: item.left,
       address: item.right,
@@ -364,6 +389,22 @@ const saveEditor = async () => {
     }));
   }
 
+  if (currentEdit === "alerts") {
+    const nextAlerts = {
+      debounce_seconds: state.alerts.debounce_seconds ?? 300,
+      email: { ...(state.alerts.email || { enabled: false, target: "" }) },
+      webhook: { ...(state.alerts.webhook || { enabled: false, target: "" }) },
+      ntfy: { ...(state.alerts.ntfy || { enabled: false, target: "" }) },
+      slack: { ...(state.alerts.slack || { enabled: false, target: "" }) },
+      discord: { ...(state.alerts.discord || { enabled: false, target: "" }) },
+    };
+    parsed.forEach((item) => {
+      if (item.type === "debounce") nextAlerts.debounce_seconds = item.value;
+      if (item.type === "channel") nextAlerts[item.channel] = { enabled: item.enabled, target: item.target || "" };
+    });
+    state.alerts = nextAlerts;
+  }
+
   try {
     const response = await fetch("/api/config", {
       method: "POST",
@@ -372,6 +413,7 @@ const saveEditor = async () => {
         tiles: state.tiles,
         devices: state.devices,
         services: state.services,
+        alerts: state.alerts,
       }),
     });
     if (response.ok) {
@@ -379,6 +421,7 @@ const saveEditor = async () => {
       state.tiles = updated.tiles;
       state.devices = updated.devices;
       state.services = updated.services;
+      state.alerts = updated.alerts;
     }
   } catch (error) {
     console.error("Failed to save config", error);
