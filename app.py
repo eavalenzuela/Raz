@@ -48,12 +48,12 @@ PLACEHOLDER_PREVIEW = "preview-placeholder.svg"
 ALERT_LAST_EMITTED: Dict[str, float] = {}
 
 
-DEFAULT_CONFIG: Dict[str, List[Dict[str, Any]]] = {
+DEFAULT_CONFIG: Dict[str, Any] = {
     "tiles": [
-        {"title": "Docs", "url": "https://docs.python.org/3/"},
-        {"title": "Grafana", "url": "https://grafana.com/"},
-        {"title": "Jellyfin", "url": "https://jellyfin.org/"},
-        {"title": "Kavita", "url": "https://www.kavitareader.com/"},
+        {"title": "Docs", "url": "https://docs.python.org/3/", "group": "Reference", "pinned": True},
+        {"title": "Grafana", "url": "https://grafana.com/", "group": "Monitoring"},
+        {"title": "Jellyfin", "url": "https://jellyfin.org/", "group": "Media"},
+        {"title": "Kavita", "url": "https://www.kavitareader.com/", "group": "Media"},
     ],
     "devices": [
         {"name": "Router", "address": "192.168.1.1"},
@@ -151,17 +151,22 @@ def start_preview_worker() -> None:
     thread.start()
 
 
-def normalize_tiles(tiles: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    normalized = []
+def normalize_tiles(tiles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
     for tile in tiles:
         title = tile.get("title", "").strip()
         url = tile.get("url", "").strip()
         if not title or not url:
             continue
+        group = str(tile.get("group", "") or "").strip()
+        pinned = bool(tile.get("pinned", False))
         raw_preview = tile.get("preview") or ""
         filename = Path(raw_preview).name if raw_preview else preview_filename(url)
         enqueue_preview_fetch(url, filename)
-        normalized.append({"title": title, "url": url, "preview": filename})
+        normalized_tile: Dict[str, Any] = {"title": title, "url": url, "preview": filename, "pinned": pinned}
+        if group:
+            normalized_tile["group"] = group
+        normalized.append(normalized_tile)
     return normalized
 
 
@@ -200,14 +205,29 @@ def _validate_tiles(raw_tiles: Any) -> tuple[List[Dict[str, Any]], List[Dict[str
             continue
         title = str(tile.get("title", "") or "").strip()
         url = str(tile.get("url", "") or "").strip()
+        group_raw = tile.get("group", "")
+        pinned_raw = tile.get("pinned", False)
+        group = str(group_raw).strip() if group_raw is not None else ""
         if not title:
             errors.append({"section": "tiles", "index": idx, "field": "title", "message": "must be non-empty"})
         if not _is_valid_url(url):
             errors.append(
                 {"section": "tiles", "index": idx, "field": "url", "message": "must be a valid http/https URL"}
             )
+        if group_raw is not None and not isinstance(group_raw, str):
+            errors.append({"section": "tiles", "index": idx, "field": "group", "message": "must be a string"})
+        if not isinstance(pinned_raw, bool):
+            errors.append({"section": "tiles", "index": idx, "field": "pinned", "message": "must be a boolean"})
         if title and _is_valid_url(url):
-            validated.append({"title": title, "url": url, "preview": tile.get("preview", "")})
+            validated_tile: Dict[str, Any] = {
+                "title": title,
+                "url": url,
+                "preview": tile.get("preview", ""),
+                "pinned": bool(pinned_raw),
+            }
+            if group:
+                validated_tile["group"] = group
+            validated.append(validated_tile)
     return validated, errors
 
 

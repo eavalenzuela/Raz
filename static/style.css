@@ -92,12 +92,32 @@ body {
   transform: translateY(-1px);
 }
 
+.tile-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.tile-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tile-group-title {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 .tiles-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 16px;
-  overflow-y: auto;
-  padding-right: 4px;
 }
 
 .tile {
@@ -140,6 +160,33 @@ body {
   position: absolute;
   inset: 0;
   z-index: 2;
+}
+
+.tile.is-dragging {
+  opacity: 0.45;
+}
+
+.tile.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -6px;
+}
+
+.tile-pinned {
+  border-color: rgba(77, 163, 255, 0.45);
+}
+
+.tile-pin {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  z-index: 1;
+  background: rgba(77, 163, 255, 0.2);
+  color: #cfe5ff;
+  border: 1px solid rgba(77, 163, 255, 0.5);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.7rem;
+  font-weight: 600;
 }
 
 .status-list {

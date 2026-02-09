@@ -20,6 +20,7 @@ const state = {
 };
 
 const tilesContainer = document.getElementById("tiles");
+const tileGroupsContainer = document.getElementById("tile-groups");
 const devicesContainer = document.getElementById("devices");
 const servicesContainer = document.getElementById("services");
 const devicesUpdated = document.getElementById("devices-updated");
@@ -45,37 +46,166 @@ const ALERT_CHANNELS = ["email", "webhook", "ntfy", "slack", "discord"];
 const thumbnailUrl = (tile) =>
   tile.preview || `https://image.thum.io/get/width/800/${encodeURIComponent(tile.url)}`;
 
+const tileDragState = {
+  dragIndex: null,
+};
+
+const getTileGroupLabel = (tile) => (tile.group || "Ungrouped").trim() || "Ungrouped";
+
+const moveTile = (fromIndex, toIndex) => {
+  if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
+  const [moved] = state.tiles.splice(fromIndex, 1);
+  if (!moved) return;
+  state.tiles.splice(toIndex, 0, moved);
+};
+
+const persistConfig = async () => {
+  const response = await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      tiles: state.tiles,
+      devices: state.devices,
+      services: state.services,
+      alerts: state.alerts,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Config save failed with status ${response.status}`);
+  }
+  const updated = await response.json();
+  state.tiles = updated.tiles;
+  state.devices = updated.devices;
+  state.services = updated.services;
+  state.alerts = updated.alerts;
+};
+
+const makeTileDraggable = (tileEl, index) => {
+  tileEl.draggable = true;
+  tileEl.dataset.tileIndex = String(index);
+
+  tileEl.addEventListener("dragstart", (event) => {
+    tileDragState.dragIndex = index;
+    tileEl.classList.add("is-dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", String(index));
+    }
+  });
+
+  tileEl.addEventListener("dragend", () => {
+    tileDragState.dragIndex = null;
+    tileEl.classList.remove("is-dragging");
+    document.querySelectorAll(".tile.drop-target").forEach((node) => node.classList.remove("drop-target"));
+  });
+
+  tileEl.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    if (tileDragState.dragIndex === null || tileDragState.dragIndex === index) return;
+    tileEl.classList.add("drop-target");
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+  });
+
+  tileEl.addEventListener("dragleave", () => {
+    tileEl.classList.remove("drop-target");
+  });
+
+  tileEl.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    tileEl.classList.remove("drop-target");
+    const fromIndex = tileDragState.dragIndex ?? Number(event.dataTransfer?.getData("text/plain"));
+    if (!Number.isInteger(fromIndex)) return;
+    moveTile(fromIndex, index);
+    renderTiles();
+    try {
+      await persistConfig();
+      renderTiles();
+    } catch (error) {
+      console.error("Failed to persist tile order", error);
+    }
+  });
+};
+
 const renderTiles = () => {
-  tilesContainer.innerHTML = "";
+  if (tileGroupsContainer) {
+    tileGroupsContainer.innerHTML = "";
+  }
+  if (tilesContainer) {
+    tilesContainer.innerHTML = "";
+  }
+
+  const groups = new Map();
   state.tiles.forEach((tile, index) => {
-    const tileEl = document.createElement("article");
-    tileEl.className = "tile";
+    const label = getTileGroupLabel(tile);
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push({ tile, index });
+  });
 
-    const img = document.createElement("img");
-    img.src = thumbnailUrl(tile);
-    img.alt = `${tile.title} thumbnail`;
-    img.dataset.tileIndex = String(index);
+  const sortedGroups = Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
 
-    const label = document.createElement("div");
-    label.className = "tile-title";
-    label.textContent = tile.title;
+  sortedGroups.forEach(([groupLabel, entries]) => {
+    const section = document.createElement("section");
+    section.className = "tile-group";
 
-    const link = document.createElement("a");
-    link.href = tile.url;
-    link.target = "_blank";
-    link.rel = "noreferrer";
-    link.ariaLabel = `Open ${tile.title}`;
+    const heading = document.createElement("h3");
+    heading.className = "tile-group-title";
+    heading.textContent = groupLabel;
+    section.appendChild(heading);
 
-    tileEl.appendChild(img);
-    tileEl.appendChild(label);
-    tileEl.appendChild(link);
-    tilesContainer.appendChild(tileEl);
+    const groupGrid = document.createElement("div");
+    groupGrid.className = "tiles-grid";
+
+    entries.forEach(({ tile, index }) => {
+      const tileEl = document.createElement("article");
+      tileEl.className = "tile";
+      if (tile.pinned) {
+        tileEl.classList.add("tile-pinned");
+      }
+
+      const img = document.createElement("img");
+      img.src = thumbnailUrl(tile);
+      img.alt = `${tile.title} thumbnail`;
+      img.dataset.tileIndex = String(index);
+
+      const label = document.createElement("div");
+      label.className = "tile-title";
+      label.textContent = tile.title;
+
+      const link = document.createElement("a");
+      link.href = tile.url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.ariaLabel = `Open ${tile.title}`;
+
+      tileEl.appendChild(img);
+      tileEl.appendChild(label);
+      if (tile.pinned) {
+        const pin = document.createElement("span");
+        pin.className = "tile-pin";
+        pin.textContent = "Pinned";
+        tileEl.appendChild(pin);
+      }
+      tileEl.appendChild(link);
+      makeTileDraggable(tileEl, index);
+      groupGrid.appendChild(tileEl);
+    });
+
+    section.appendChild(groupGrid);
+    if (tileGroupsContainer) {
+      tileGroupsContainer.appendChild(section);
+    } else if (tilesContainer) {
+      tilesContainer.appendChild(groupGrid);
+    }
   });
 };
 
 const refreshTilePreviews = () => {
   const timestamp = Date.now();
-  tilesContainer.querySelectorAll("img").forEach((img) => {
+  const tileRoot = tileGroupsContainer || tilesContainer;
+  if (!tileRoot) return;
+  tileRoot.querySelectorAll("img").forEach((img) => {
     const index = Number(img.dataset.tileIndex);
     const tile = state.tiles[index];
     if (!tile) return;
@@ -234,6 +364,9 @@ const openEditor = (target) => {
       .map((item) => {
         if (target === "services") return formatServiceLine(item);
         const key = target === "devices" ? "address" : "url";
+        if (target === "tiles") {
+          return `${item.title} | ${item[key]} | ${item.group || ""} | ${item.pinned ? "true" : "false"}`;
+        }
         return `${item.name} | ${item[key]}`;
       })
       .join("\n");
@@ -396,6 +529,18 @@ const validateLines = (target, lines) => {
     } else if (!isValidUrl(right)) {
       errors.push(`Line ${lineNumber}: URL must be a valid http(s) address.`);
     }
+    if (target === "tiles") {
+      const extras = parts.slice(2);
+      const group = (extras[0] || "").trim();
+      const pinnedRaw = (extras[1] || "").trim().toLowerCase();
+      const allowedPinnedValues = ["", "true", "false", "1", "0", "yes", "no", "on", "off"];
+      if (!allowedPinnedValues.includes(pinnedRaw)) {
+        errors.push(`Line ${lineNumber}: pinned must be true/false.`);
+      }
+      const pinned = ["true", "1", "yes", "on"].includes(pinnedRaw);
+      parsed.push({ left: name, right, group, pinned });
+      return;
+    }
     parsed.push({ left: name, right });
   });
   return { errors, parsed };
@@ -412,7 +557,12 @@ const saveEditor = async () => {
   clearEditorErrors();
 
   if (currentEdit === "tiles") {
-    state.tiles = parsed.map((item) => ({ title: item.left, url: item.right }));
+    state.tiles = parsed.map((item) => ({
+      title: item.left,
+      url: item.right,
+      ...(item.group ? { group: item.group } : {}),
+      ...(item.pinned ? { pinned: true } : {}),
+    }));
   }
 
   if (currentEdit === "devices") {
@@ -457,23 +607,7 @@ const saveEditor = async () => {
   }
 
   try {
-    const response = await fetch("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tiles: state.tiles,
-        devices: state.devices,
-        services: state.services,
-        alerts: state.alerts,
-      }),
-    });
-    if (response.ok) {
-      const updated = await response.json();
-      state.tiles = updated.tiles;
-      state.devices = updated.devices;
-      state.services = updated.services;
-      state.alerts = updated.alerts;
-    }
+    await persistConfig();
   } catch (error) {
     console.error("Failed to save config", error);
   }
