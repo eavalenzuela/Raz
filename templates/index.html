@@ -27,7 +27,7 @@
             ✎
           </button>
         </header>
-        <div id="tiles" class="tiles-grid"></div>
+        <div id="tile-groups" class="tile-groups"></div>
       </section>
 
       <aside class="pane-column">
@@ -79,7 +79,7 @@
           <button id="editor-close" aria-label="Close editor">×</button>
         </header>
         <p class="editor-help">
-          Enter one item per line. For tiles: <code>Title | https://example.com</code>.
+          Enter one item per line. For tiles: <code>Title | https://example.com | Group | true</code>.
           For devices: <code>Name | 192.168.1.2</code>. For services:
           <code>Name | https://... | GET | 2 | 200 | /health | contains text | {"Content-Type":"application/json"} | {"$.status":"ok"}</code>.
           The last three service fields are optional.
