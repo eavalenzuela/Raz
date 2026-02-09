@@ -31,14 +31,35 @@ const editorTitle = document.getElementById("editor-title");
 const editorText = document.getElementById("editor-text");
 const editorSave = document.getElementById("editor-save");
 const editorClose = document.getElementById("editor-close");
-const editorErrors = document.createElement("div");
-editorErrors.id = "editor-errors";
-editorErrors.className = "editor-errors";
-editorErrors.setAttribute("role", "alert");
-editorErrors.setAttribute("aria-live", "polite");
-editorText.insertAdjacentElement("afterend", editorErrors);
+const editorErrors = document.getElementById("editor-errors");
+const editorStatus = document.getElementById("editor-status");
 
 let currentEdit = null;
+
+let editorStatusTimer = null;
+
+const clearEditorStatus = () => {
+  if (editorStatusTimer) {
+    clearTimeout(editorStatusTimer);
+    editorStatusTimer = null;
+  }
+  editorStatus.textContent = "";
+  editorStatus.className = "editor-status";
+};
+
+const showEditorStatus = (message, kind = "info", { autoClearMs = null } = {}) => {
+  clearEditorStatus();
+  editorStatus.textContent = message;
+  editorStatus.classList.add("active");
+  if (kind) {
+    editorStatus.classList.add(`is-${kind}`);
+  }
+  if (autoClearMs) {
+    editorStatusTimer = setTimeout(() => {
+      clearEditorStatus();
+    }, autoClearMs);
+  }
+};
 
 const VALID_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
 const ALERT_CHANNELS = ["email", "webhook", "ntfy", "slack", "discord"];
@@ -351,6 +372,7 @@ const openEditor = (target) => {
   currentEdit = target;
   editorTitle.textContent = `Edit ${target}`;
   clearEditorErrors();
+  clearEditorStatus();
   if (target === "alerts") {
     const lines = [`debounce_seconds | ${state.alerts.debounce_seconds ?? 300}`];
     ALERT_CHANNELS.forEach((channel) => {
@@ -380,6 +402,7 @@ const closeEditor = () => {
   editor.setAttribute("aria-hidden", "true");
   currentEdit = null;
   clearEditorErrors();
+  clearEditorStatus();
 };
 
 const isValidUrl = (value) => {
@@ -552,9 +575,11 @@ const saveEditor = async () => {
   const { errors, parsed } = validateLines(currentEdit, lines);
   if (errors.length) {
     showEditorErrors(errors);
+    clearEditorStatus();
     return;
   }
   clearEditorErrors();
+  showEditorStatus("Saving…", "info");
 
   if (currentEdit === "tiles") {
     state.tiles = parsed.map((item) => ({
@@ -610,10 +635,15 @@ const saveEditor = async () => {
     await persistConfig();
   } catch (error) {
     console.error("Failed to save config", error);
+    showEditorStatus("Could not save changes. Please try again.", "error");
+    return;
   }
 
   renderAll();
-  closeEditor();
+  showEditorStatus("Saved", "success", { autoClearMs: 1200 });
+  setTimeout(() => {
+    closeEditor();
+  }, 500);
 };
 
 const buildHistoryMap = (entries, key) => {
