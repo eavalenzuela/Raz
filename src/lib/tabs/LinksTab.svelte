@@ -83,6 +83,52 @@
     await loadLinks();
   }
 
+  // Drag-and-drop reordering
+  let dragIndex = $state(null);
+  let dropIndex = $state(null);
+  let didDrag = false;
+
+  function onDragStart(event, index) {
+    dragIndex = index;
+    didDrag = true;
+    event.dataTransfer.effectAllowed = "move";
+    // Required for Firefox
+    event.dataTransfer.setData("text/plain", String(index));
+  }
+
+  function onDragOver(event, index) {
+    if (dragIndex === null) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    dropIndex = index;
+  }
+
+  async function onDrop(event, index) {
+    event.preventDefault();
+    if (dragIndex !== null && dragIndex !== index) {
+      const reordered = [...links];
+      const [moved] = reordered.splice(dragIndex, 1);
+      reordered.splice(index, 0, moved);
+      links = reordered;
+      await invoke("reorder_links", { ids: reordered.map(l => l.id) });
+    }
+    dragIndex = null;
+    dropIndex = null;
+  }
+
+  function onDragEnd() {
+    dragIndex = null;
+    dropIndex = null;
+  }
+
+  function handleClick(link) {
+    if (didDrag) {
+      didDrag = false;
+      return;
+    }
+    openLink(link);
+  }
+
   function faviconUrl(url) {
     try {
       const u = new URL(url);
@@ -116,11 +162,18 @@
     </div>
   {:else}
     <div class="link-grid">
-      {#each links as link}
+      {#each links as link, i}
         <button
           class="link-card"
-          onclick={() => openLink(link)}
+          class:dragging={dragIndex === i}
+          class:drop-target={dropIndex === i && dragIndex !== i}
+          draggable="true"
+          onclick={() => handleClick(link)}
           oncontextmenu={(e) => showContextMenu(e, link)}
+          ondragstart={(e) => onDragStart(e, i)}
+          ondragover={(e) => onDragOver(e, i)}
+          ondrop={(e) => onDrop(e, i)}
+          ondragend={onDragEnd}
         >
           <div class="link-icon">
             {#if link.icon}
@@ -254,6 +307,15 @@
 
   .link-card:hover {
     background: var(--hover);
+  }
+
+  .link-card.dragging {
+    opacity: 0.4;
+  }
+
+  .link-card.drop-target {
+    outline: 2px dashed var(--accent);
+    outline-offset: -2px;
   }
 
   .link-icon {
