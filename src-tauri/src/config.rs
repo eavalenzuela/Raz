@@ -61,6 +61,20 @@ pub struct ServerEntry {
     pub env_vars: Vec<EnvVar>,
     #[serde(default)]
     pub auto_launch: bool,
+    #[serde(default)]
+    pub auto_restart: bool,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_cooldown")]
+    pub restart_cooldown_secs: u64,
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+fn default_cooldown() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +219,9 @@ impl ServerEntry {
         working_directory: Option<String>,
         env_vars: Vec<EnvVar>,
         auto_launch: bool,
+        auto_restart: bool,
+        max_retries: u32,
+        restart_cooldown_secs: u64,
     ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -215,6 +232,9 @@ impl ServerEntry {
             working_directory,
             env_vars,
             auto_launch,
+            auto_restart,
+            max_retries,
+            restart_cooldown_secs,
         }
     }
 }

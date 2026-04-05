@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use std::time::Instant;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ServerStatus {
@@ -11,9 +12,19 @@ pub struct ServerStatus {
     pub state: String, // "running", "stopped", "crashed"
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ServerResources {
+    pub pid: u32,
+    pub uptime_secs: u64,
+    pub memory_kb: u64,
+    pub cpu_percent: f64,
+}
+
 pub struct RunningServer {
     pub(crate) child: Child,
     output: Arc<Mutex<Vec<String>>>,
+    started_at: Instant,
+    restart_count: u32,
 }
 
 pub struct ServerManager(pub Mutex<HashMap<String, RunningServer>>);
@@ -25,6 +36,11 @@ impl ServerManager {
 }
 
 const MAX_OUTPUT_LINES: usize = 5000;
+
+fn timestamp() -> String {
+    let now = chrono::Local::now();
+    now.format("%H:%M:%S").to_string()
+}
 
 fn spawn_server(
     entry: &ServerEntry,
@@ -65,15 +81,16 @@ fn spawn_server(
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 if let Ok(line) = line {
+                    let stamped = format!("[{}] {}", timestamp(), line);
                     {
                         let mut buf = output_clone.lock().unwrap();
-                        buf.push(line.clone());
+                        buf.push(stamped.clone());
                         if buf.len() > MAX_OUTPUT_LINES {
                             let excess = buf.len() - MAX_OUTPUT_LINES;
-                        buf.drain(0..excess);
+                            buf.drain(0..excess);
                         }
                     }
-                    let _ = handle.emit("server-output", (&id, &line));
+                    let _ = handle.emit("server-output", (&id, &stamped));
                 }
             }
         });
@@ -88,22 +105,27 @@ fn spawn_server(
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
                 if let Ok(line) = line {
-                    let tagged = format!("[stderr] {}", line);
+                    let stamped = format!("[{}] [stderr] {}", timestamp(), line);
                     {
                         let mut buf = output_clone.lock().unwrap();
-                        buf.push(tagged.clone());
+                        buf.push(stamped.clone());
                         if buf.len() > MAX_OUTPUT_LINES {
                             let excess = buf.len() - MAX_OUTPUT_LINES;
-                        buf.drain(0..excess);
+                            buf.drain(0..excess);
                         }
                     }
-                    let _ = handle.emit("server-output", (&id, &tagged));
+                    let _ = handle.emit("server-output", (&id, &stamped));
                 }
             }
         });
     }
 
-    Ok(RunningServer { child, output })
+    Ok(RunningServer {
+        child,
+        output,
+        started_at: Instant::now(),
+        restart_count: 0,
+    })
 }
 
 // ── Commands ───────────────────────────────────────────
@@ -125,10 +147,16 @@ pub fn add_server(
     working_directory: Option<String>,
     env_vars: Vec<EnvVar>,
     auto_launch: bool,
+    auto_restart: bool,
+    max_retries: u32,
+    restart_cooldown_secs: u64,
 ) -> Result<ServerEntry, String> {
     let entry = {
         let mut config = state.0.lock().unwrap();
-        let entry = ServerEntry::new(name, raw_command, executable, arguments, working_directory, env_vars, auto_launch);
+        let entry = ServerEntry::new(
+            name, raw_command, executable, arguments, working_directory,
+            env_vars, auto_launch, auto_restart, max_retries, restart_cooldown_secs,
+        );
         config.servers.push(entry.clone());
         save_config(&config)?;
         entry
@@ -149,6 +177,9 @@ pub fn update_server(
     working_directory: Option<String>,
     env_vars: Vec<EnvVar>,
     auto_launch: bool,
+    auto_restart: bool,
+    max_retries: u32,
+    restart_cooldown_secs: u64,
 ) -> Result<ServerEntry, String> {
     let updated = {
         let mut config = state.0.lock().unwrap();
@@ -160,6 +191,9 @@ pub fn update_server(
         server.working_directory = working_directory;
         server.env_vars = env_vars;
         server.auto_launch = auto_launch;
+        server.auto_restart = auto_restart;
+        server.max_retries = max_retries;
+        server.restart_cooldown_secs = restart_cooldown_secs;
         let updated = server.clone();
         save_config(&config)?;
         updated
@@ -239,16 +273,84 @@ pub fn get_server_output(manager: State<ServerManager>, id: String) -> Vec<Strin
 }
 
 #[tauri::command]
-pub fn get_all_server_statuses(manager: State<ServerManager>) -> Vec<ServerStatus> {
+pub fn export_server_log(manager: State<ServerManager>, id: String, path: String) -> Result<(), String> {
+    let running = manager.0.lock().unwrap();
+    if let Some(server) = running.get(&id) {
+        let output = server.output.lock().unwrap();
+        let content = output.join("\n");
+        std::fs::write(&path, content).map_err(|e| format!("Failed to write log: {}", e))?;
+        Ok(())
+    } else {
+        Err("Server is not running".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn get_server_resources(manager: State<ServerManager>, id: String) -> Result<ServerResources, String> {
+    let running = manager.0.lock().unwrap();
+    let server = running.get(&id).ok_or("Server is not running")?;
+
+    let pid = server.child.id();
+    let uptime_secs = server.started_at.elapsed().as_secs();
+
+    // Read memory from /proc/{pid}/status
+    let memory_kb = std::fs::read_to_string(format!("/proc/{}/status", pid))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+
+    // Read CPU from /proc/{pid}/stat
+    let cpu_percent = read_cpu_percent(pid).unwrap_or(0.0);
+
+    Ok(ServerResources {
+        pid,
+        uptime_secs,
+        memory_kb,
+        cpu_percent,
+    })
+}
+
+fn read_cpu_percent(pid: u32) -> Option<f64> {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    let fields: Vec<&str> = stat.split_whitespace().collect();
+    if fields.len() < 22 {
+        return None;
+    }
+    let utime: u64 = fields[13].parse().ok()?;
+    let stime: u64 = fields[14].parse().ok()?;
+    let starttime: u64 = fields[21].parse().ok()?;
+
+    let uptime_str = std::fs::read_to_string("/proc/uptime").ok()?;
+    let system_uptime: f64 = uptime_str.split_whitespace().next()?.parse().ok()?;
+
+    let clk_tck: f64 = 100.0; // sysconf(_SC_CLK_TCK), almost always 100 on Linux
+    let total_time = (utime + stime) as f64 / clk_tck;
+    let elapsed = system_uptime - (starttime as f64 / clk_tck);
+
+    if elapsed > 0.0 {
+        Some((total_time / elapsed) * 100.0)
+    } else {
+        Some(0.0)
+    }
+}
+
+#[tauri::command]
+pub fn get_all_server_statuses(
+    manager: State<ServerManager>,
+    app_handle: AppHandle,
+) -> Vec<ServerStatus> {
     let mut running = manager.0.lock().unwrap();
     let mut statuses = Vec::new();
 
-    // Check each running server and detect crashed ones
     let mut crashed = Vec::new();
     for (id, server) in running.iter_mut() {
         match server.child.try_wait() {
             Ok(Some(_exit)) => {
-                // Process exited
                 crashed.push(id.clone());
                 statuses.push(ServerStatus {
                     id: id.clone(),
@@ -271,9 +373,36 @@ pub fn get_all_server_statuses(manager: State<ServerManager>) -> Vec<ServerStatu
         }
     }
 
-    // Remove crashed servers from the running map
+    // Handle crashed servers — auto-restart if configured
     for id in crashed {
-        running.remove(&id);
+        let removed = running.remove(&id);
+        if let Some(old_server) = removed {
+            let config = {
+                let cs = app_handle.try_state::<ConfigState>().unwrap();
+                let cfg = cs.0.lock().unwrap().clone();
+                cfg
+            };
+            if let Some(entry) = config.servers.iter().find(|s| s.id == id) {
+                if entry.auto_restart && old_server.restart_count < entry.max_retries {
+                    let cooldown = std::time::Duration::from_secs(entry.restart_cooldown_secs);
+                    let entry = entry.clone();
+                    let id = id.clone();
+                    let handle = app_handle.clone();
+
+                    // Spawn restart in background after cooldown
+                    std::thread::spawn(move || {
+                        std::thread::sleep(cooldown);
+                        if let Ok(mut new_server) = spawn_server(&entry, &handle) {
+                            new_server.restart_count = old_server.restart_count + 1;
+                            let manager = handle.try_state::<ServerManager>().unwrap();
+                            let mut running = manager.0.lock().unwrap();
+                            running.insert(id, new_server);
+                            let _ = handle.emit("tray-update", ());
+                        }
+                    });
+                }
+            }
+        }
     }
 
     statuses

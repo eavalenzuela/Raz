@@ -1,6 +1,7 @@
 <script>
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { save } from "@tauri-apps/plugin-dialog";
   import { onMount, onDestroy } from "svelte";
 
   let servers = $state([]);
@@ -14,6 +15,28 @@
   let unlisten = null;
   let pollInterval = null;
 
+  // Log search/filter
+  let logSearch = $state("");
+  let logLevelFilter = $state("all"); // "all", "stdout", "stderr"
+
+  let filteredLines = $derived(() => {
+    let lines = outputLines;
+    if (logLevelFilter === "stderr") {
+      lines = lines.filter(l => l.includes("[stderr]"));
+    } else if (logLevelFilter === "stdout") {
+      lines = lines.filter(l => !l.includes("[stderr]"));
+    }
+    if (logSearch.trim()) {
+      const q = logSearch.toLowerCase();
+      lines = lines.filter(l => l.toLowerCase().includes(q));
+    }
+    return lines;
+  });
+
+  // Resource monitoring
+  let resources = $state(null);
+  let resourceInterval = null;
+
   // Form state
   let formMode = $state("simple");
   let formName = $state("");
@@ -22,6 +45,9 @@
   let formArguments = $state("");
   let formWorkingDir = $state("");
   let formAutoLaunch = $state(false);
+  let formAutoRestart = $state(false);
+  let formMaxRetries = $state(3);
+  let formRestartCooldown = $state(5);
   let formEnvVars = $state([]);
 
   onMount(async () => {
@@ -33,7 +59,6 @@
       const [id, line] = event.payload;
       if (id === selectedServerId) {
         outputLines = [...outputLines, line];
-        // Auto-scroll
         requestAnimationFrame(() => {
           if (outputEl) outputEl.scrollTop = outputEl.scrollHeight;
         });
@@ -44,6 +69,7 @@
   onDestroy(() => {
     if (unlisten) unlisten();
     if (pollInterval) clearInterval(pollInterval);
+    if (resourceInterval) clearInterval(resourceInterval);
   });
 
   async function loadServers() {
@@ -78,6 +104,9 @@
     formArguments = server.arguments.join(" ");
     formWorkingDir = server.working_directory || "";
     formAutoLaunch = server.auto_launch;
+    formAutoRestart = server.auto_restart;
+    formMaxRetries = server.max_retries;
+    formRestartCooldown = server.restart_cooldown_secs;
     formEnvVars = server.env_vars.length > 0
       ? server.env_vars.map(e => ({ ...e }))
       : [];
@@ -93,6 +122,9 @@
     formArguments = "";
     formWorkingDir = "";
     formAutoLaunch = false;
+    formAutoRestart = false;
+    formMaxRetries = 3;
+    formRestartCooldown = 5;
     formEnvVars = [];
   }
 
@@ -115,6 +147,9 @@
       workingDirectory: formWorkingDir || null,
       envVars: formMode === "simple" ? envVars : [],
       autoLaunch: formAutoLaunch,
+      autoRestart: formAutoRestart,
+      maxRetries: formMaxRetries,
+      restartCooldownSecs: formRestartCooldown,
     };
 
     if (editingServer) {
@@ -141,6 +176,7 @@
     try {
       await invoke("stop_server", { id: server.id });
       await pollStatuses();
+      resources = null;
     } catch (e) {
       console.error("Failed to stop server:", e);
     }
@@ -149,9 +185,26 @@
   async function selectServer(server) {
     selectedServerId = server.id;
     outputLines = await invoke("get_server_output", { id: server.id });
+    logSearch = "";
+    logLevelFilter = "all";
     requestAnimationFrame(() => {
       if (outputEl) outputEl.scrollTop = outputEl.scrollHeight;
     });
+
+    // Start resource polling for this server
+    if (resourceInterval) clearInterval(resourceInterval);
+    resources = null;
+    await pollResources();
+    resourceInterval = setInterval(pollResources, 5000);
+  }
+
+  async function pollResources() {
+    if (!selectedServerId) return;
+    try {
+      resources = await invoke("get_server_resources", { id: selectedServerId });
+    } catch {
+      resources = null;
+    }
   }
 
   function showContextMenu(event, server) {
@@ -169,6 +222,8 @@
     if (selectedServerId === server.id) {
       selectedServerId = null;
       outputLines = [];
+      resources = null;
+      if (resourceInterval) clearInterval(resourceInterval);
     }
     await loadServers();
   }
@@ -185,6 +240,35 @@
   function viewLogs(server) {
     selectServer(server);
     contextMenu = null;
+  }
+
+  async function exportLog() {
+    if (!selectedServerId) return;
+    const path = await save({
+      defaultPath: `server-log-${selectedServerId}.txt`,
+      filters: [{ name: "Text", extensions: ["txt", "log"] }],
+    });
+    if (path) {
+      try {
+        await invoke("export_server_log", { id: selectedServerId, path });
+      } catch (e) {
+        console.error("Failed to export log:", e);
+      }
+    }
+  }
+
+  function formatUptime(secs) {
+    if (secs < 60) return `${secs}s`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    return `${h}h ${m}m`;
+  }
+
+  function formatMemory(kb) {
+    if (kb < 1024) return `${kb} KB`;
+    if (kb < 1024 * 1024) return `${(kb / 1024).toFixed(1)} MB`;
+    return `${(kb / (1024 * 1024)).toFixed(2)} GB`;
   }
 </script>
 
@@ -205,17 +289,24 @@
     <div class="servers-layout">
       <div class="server-list">
         {#each servers as server}
-          <button
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
             class="server-row"
             class:selected={selectedServerId === server.id}
             onclick={() => selectServer(server)}
             oncontextmenu={(e) => showContextMenu(e, server)}
+            onkeydown={() => {}}
+            role="button"
+            tabindex="0"
           >
             <span class="state-dot {serverState(server)}"></span>
             <span class="server-name">{server.name}</span>
             <span class="server-state-label">{serverState(server)}</span>
             {#if server.auto_launch}
               <span class="auto-badge">auto</span>
+            {/if}
+            {#if server.auto_restart}
+              <span class="restart-badge">restart</span>
             {/if}
             <div class="server-actions">
               {#if serverState(server) === "running"}
@@ -224,21 +315,45 @@
                 <button class="action-btn start" onclick={(e) => { e.stopPropagation(); startServer(server); }} title="Start">&#9654;</button>
               {/if}
             </div>
-          </button>
+          </div>
         {/each}
       </div>
 
       <div class="output-panel">
         {#if selectedServerId}
           <div class="output-header">
-            <span>Output: {servers.find(s => s.id === selectedServerId)?.name || ""}</span>
+            <span class="output-title">Output: {servers.find(s => s.id === selectedServerId)?.name || ""}</span>
+            <div class="output-controls">
+              <select bind:value={logLevelFilter} class="level-filter">
+                <option value="all">All</option>
+                <option value="stdout">stdout</option>
+                <option value="stderr">stderr</option>
+              </select>
+              <input
+                type="text"
+                class="log-search"
+                placeholder="Search logs..."
+                bind:value={logSearch}
+              />
+              <button class="export-btn" onclick={exportLog} title="Export log">Export</button>
+            </div>
           </div>
+
+          {#if resources}
+            <div class="resource-bar">
+              <span class="resource-item" title="Process ID">PID: {resources.pid}</span>
+              <span class="resource-item" title="Uptime">Up: {formatUptime(resources.uptime_secs)}</span>
+              <span class="resource-item" title="Memory (RSS)">Mem: {formatMemory(resources.memory_kb)}</span>
+              <span class="resource-item" title="CPU Usage">CPU: {resources.cpu_percent.toFixed(1)}%</span>
+            </div>
+          {/if}
+
           <div class="output-log" bind:this={outputEl}>
-            {#if outputLines.length === 0}
-              <span class="output-empty">No output yet.</span>
+            {#if filteredLines().length === 0}
+              <span class="output-empty">{outputLines.length === 0 ? "No output yet." : "No matching lines."}</span>
             {:else}
-              {#each outputLines as line}
-                <div class="log-line" class:stderr={line.startsWith("[stderr]")}>{line}</div>
+              {#each filteredLines() as line}
+                <div class="log-line" class:stderr={line.includes("[stderr]")}>{line}</div>
               {/each}
             {/if}
           </div>
@@ -322,6 +437,26 @@
           <input type="checkbox" bind:checked={formAutoLaunch} />
           Auto-launch when Raz starts
         </label>
+
+        <fieldset class="restart-fieldset">
+          <legend>Auto-Restart</legend>
+          <label class="checkbox-label">
+            <input type="checkbox" bind:checked={formAutoRestart} />
+            Restart automatically if process exits
+          </label>
+          {#if formAutoRestart}
+            <div class="restart-options">
+              <label>
+                Max retries
+                <input type="number" bind:value={formMaxRetries} min="1" max="100" />
+              </label>
+              <label>
+                Cooldown (seconds)
+                <input type="number" bind:value={formRestartCooldown} min="0" max="300" />
+              </label>
+            </div>
+          {/if}
+        </fieldset>
 
         <div class="modal-actions">
           <button type="button" class="cancel-btn" onclick={() => showModal = false}>Cancel</button>
@@ -450,7 +585,7 @@
     text-transform: capitalize;
   }
 
-  .auto-badge {
+  .auto-badge, .restart-badge {
     font-size: 0.7em;
     background: var(--accent);
     color: white;
@@ -458,6 +593,10 @@
     border-radius: 4px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+
+  .restart-badge {
+    background: #8b5cf6;
   }
 
   .server-actions {
@@ -505,6 +644,79 @@
     font-size: 0.85em;
     font-weight: 500;
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .output-title {
+    white-space: nowrap;
+  }
+
+  .output-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .level-filter {
+    padding: 3px 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.85em;
+    font-family: inherit;
+  }
+
+  .log-search {
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.85em;
+    font-family: inherit;
+    width: 140px;
+  }
+
+  .log-search:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+
+  .export-btn {
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 0.85em;
+    font-family: inherit;
+  }
+
+  .export-btn:hover {
+    background: var(--hover);
+  }
+
+  /* Resource bar */
+  .resource-bar {
+    padding: 4px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    display: flex;
+    gap: 16px;
+    font-size: 0.78em;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    font-family: "Fira Code", "Cascadia Code", "Consolas", monospace;
+  }
+
+  .resource-item {
+    white-space: nowrap;
   }
 
   .output-log {
@@ -643,7 +855,8 @@
     font-weight: 400;
   }
 
-  input[type="text"] {
+  input[type="text"],
+  input[type="number"] {
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -654,6 +867,7 @@
   }
 
   input[type="text"]:focus,
+  input[type="number"]:focus,
   textarea:focus {
     outline: 2px solid var(--accent);
     outline-offset: -1px;
@@ -719,6 +933,25 @@
     font-weight: 500;
     color: var(--text-muted);
     padding: 0 4px;
+  }
+
+  .restart-fieldset {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .restart-options {
+    display: flex;
+    gap: 12px;
+  }
+
+  .restart-options label {
+    flex: 1;
+  }
+
+  .restart-options input[type="number"] {
+    width: 100%;
   }
 
   .env-row {

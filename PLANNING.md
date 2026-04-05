@@ -68,11 +68,28 @@ A minimal personal launcher and homepage. Not a power-user dashboard — a clean
 - `.desktop` file registered via package or "Create Desktop Icon" menu action
 - System tray via Tauri tray API
 
-## Future Considerations
+## Roadmap
 
+### Apps
+- [x] Search/filter bar — type to filter apps by name or type label
+- [x] Drag-and-drop reordering — backend `reorder_apps` exists, wire up in UI
+- [x] Grid view toggle — switch between list view and compact icon grid
+- [x] Launch counter / recents — track launch count and last-used timestamp, sort by most-used or recent
+- [x] Bulk .desktop import — scan `/usr/share/applications` and pick multiple apps to import at once
+
+### Links
+- [x] Folders / collections — group links into named folders with collapsible sections
+- [x] Local favicon caching — download and store favicons locally (offline support + privacy)
+- [x] URL validation & metadata fetch — on add, fetch page title as default name and verify URL is reachable
+
+### Servers
+- [x] Auto-restart on crash — configurable per server, with optional max-retry count and cooldown delay
+- [x] Log timestamps — prepend each output line with a timestamp
+- [x] Log search/filter — text filter or regex search within the log viewer, with highlight
+- [x] Log export — button to save the current log buffer to a file
+- [x] Resource monitoring — show PID, uptime, and CPU/memory usage per running server (via `/proc` on Linux)
+
+### Future Considerations
 - Global hotkey / Spotlight-style summoning
-- Search bar or command palette
-- Sub-grouping or categories within tabs
-- User-created custom tabs
 - Plugin/extension system
 - Multi-machine sync
