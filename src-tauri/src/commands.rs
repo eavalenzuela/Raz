@@ -83,7 +83,7 @@ pub fn launch_app(state: State<ConfigState>, id: String) -> Result<(), String> {
 
     if let Some(ref raw) = app.raw_command {
         // Raw command mode: execute via shell
-        let mut cmd = Command::new("sh");
+        let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(raw);
 
         if let Some(ref dir) = app.working_directory {
