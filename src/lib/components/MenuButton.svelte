@@ -101,7 +101,7 @@
       </div>
       <div class="about-body">
         <div class="about-title">Raz</div>
-        <div class="about-version">v1.0.0</div>
+        <div class="about-version">v1.1.0</div>
         <p class="about-description">A minimal personal launcher and homepage for launching apps, bookmarking links, and monitoring system and service status.</p>
         <div class="about-meta">
           <span>Built with Tauri v2 + Svelte</span>
