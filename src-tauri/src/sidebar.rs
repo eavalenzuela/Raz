@@ -191,16 +191,23 @@ pub fn start_monitor_loop(
                 let is_up = check_target(&monitor.target, &monitor.check_type);
                 let new_state = if is_up { "up" } else { "down" };
 
-                // Check for state change and notify
+                // Check for state change and notify (respecting settings)
                 let prev = prev_states.get(&monitor.id);
                 if let Some(prev) = prev {
                     if prev != new_state {
-                        let title = if new_state == "down" {
-                            format!("{} is down", monitor.name)
-                        } else {
-                            format!("{} is back up", monitor.name)
-                        };
-                        let _ = handle.emit("monitor-notification", &title);
+                        let cs = handle.try_state::<ConfigState>().unwrap();
+                        let settings = cs.0.lock().unwrap().settings.clone();
+                        let should_notify = settings.notifications_enabled
+                            && ((new_state == "down" && settings.notify_on_down)
+                                || (new_state == "up" && settings.notify_on_up));
+                        if should_notify {
+                            let title = if new_state == "down" {
+                                format!("{} is down", monitor.name)
+                            } else {
+                                format!("{} is back up", monitor.name)
+                            };
+                            let _ = handle.emit("monitor-notification", &title);
+                        }
                     }
                 }
                 prev_states.insert(monitor.id.clone(), new_state.to_string());

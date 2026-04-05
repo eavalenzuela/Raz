@@ -4,6 +4,13 @@
   let showMenu = $state(false);
   let settingsOpen = $state(false);
 
+  // Settings form state
+  let defaultCheckInterval = $state(60);
+  let notificationsEnabled = $state(true);
+  let notifyOnDown = $state(true);
+  let notifyOnUp = $state(true);
+  let minimizeToTray = $state(true);
+
   function toggleMenu() {
     showMenu = !showMenu;
   }
@@ -12,9 +19,30 @@
     showMenu = false;
   }
 
-  function openSettings() {
-    settingsOpen = true;
+  async function openSettings() {
     closeMenu();
+    try {
+      const s = await invoke("get_settings");
+      defaultCheckInterval = s.default_check_interval_secs;
+      notificationsEnabled = s.notifications_enabled;
+      notifyOnDown = s.notify_on_down;
+      notifyOnUp = s.notify_on_up;
+      minimizeToTray = s.minimize_to_tray;
+    } catch (_) {}
+    settingsOpen = true;
+  }
+
+  async function saveSettings() {
+    await invoke("update_settings", {
+      settings: {
+        default_check_interval_secs: defaultCheckInterval,
+        notifications_enabled: notificationsEnabled,
+        notify_on_down: notifyOnDown,
+        notify_on_up: notifyOnUp,
+        minimize_to_tray: minimizeToTray,
+      },
+    });
+    settingsOpen = false;
   }
 
   async function quitApp() {
@@ -52,9 +80,44 @@
         <h2>Settings</h2>
         <button class="close-btn" onclick={() => settingsOpen = false}>&times;</button>
       </div>
-      <div class="modal-body">
-        <p>Settings will go here.</p>
-      </div>
+      <form class="modal-body" onsubmit={(e) => { e.preventDefault(); saveSettings(); }}>
+        <fieldset>
+          <legend>Status Monitor</legend>
+          <label>
+            Default check interval (seconds)
+            <input type="number" bind:value={defaultCheckInterval} min="10" step="10" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Notifications</legend>
+          <label class="checkbox-label">
+            <input type="checkbox" bind:checked={notificationsEnabled} />
+            Enable desktop notifications
+          </label>
+          <label class="checkbox-label sub" class:disabled={!notificationsEnabled}>
+            <input type="checkbox" bind:checked={notifyOnDown} disabled={!notificationsEnabled} />
+            Notify when a target goes down
+          </label>
+          <label class="checkbox-label sub" class:disabled={!notificationsEnabled}>
+            <input type="checkbox" bind:checked={notifyOnUp} disabled={!notificationsEnabled} />
+            Notify when a target comes back up
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Window</legend>
+          <label class="checkbox-label">
+            <input type="checkbox" bind:checked={minimizeToTray} />
+            Minimize to tray on close
+          </label>
+        </fieldset>
+
+        <div class="modal-actions">
+          <button type="button" class="cancel-btn" onclick={() => settingsOpen = false}>Cancel</button>
+          <button type="submit" class="save-btn">Save</button>
+        </div>
+      </form>
     </div>
   </div>
 {/if}
@@ -165,5 +228,104 @@
 
   .modal-body {
     padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  fieldset {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  legend {
+    font-size: 0.85em;
+    font-weight: 500;
+    color: var(--text-muted);
+    padding: 0 4px;
+  }
+
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.85em;
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+
+  .checkbox-label {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    color: var(--text);
+    font-weight: 400;
+  }
+
+  .checkbox-label.sub {
+    padding-left: 24px;
+  }
+
+  .checkbox-label.disabled {
+    opacity: 0.5;
+  }
+
+  .checkbox-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+  }
+
+  input[type="number"] {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.95rem;
+    font-family: inherit;
+    width: 120px;
+  }
+
+  input[type="number"]:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .cancel-btn {
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .save-btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: white;
+    cursor: pointer;
+    font-weight: 500;
+    font-family: inherit;
+  }
+
+  .save-btn:hover {
+    opacity: 0.9;
   }
 </style>

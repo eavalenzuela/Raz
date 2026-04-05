@@ -137,6 +137,8 @@ pub fn run() {
             sidebar::update_status_monitor,
             sidebar::remove_status_monitor,
             sidebar::get_monitor_statuses,
+            commands::get_settings,
+            commands::update_settings,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -192,10 +194,16 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // Minimize to tray instead of closing
-                api.prevent_close();
-                let _ = window.minimize();
-                let _ = window.set_skip_taskbar(true);
+                let minimize = window
+                    .app_handle()
+                    .try_state::<ConfigState>()
+                    .map(|s| s.0.lock().unwrap().settings.minimize_to_tray)
+                    .unwrap_or(true);
+                if minimize {
+                    api.prevent_close();
+                    let _ = window.minimize();
+                    let _ = window.set_skip_taskbar(true);
+                }
             }
         })
         .run(tauri::generate_context!())

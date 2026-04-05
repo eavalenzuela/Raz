@@ -124,6 +124,28 @@ Each tab is a dedicated view — no internal sub-grouping within tabs for now.
 - Registers a `.desktop` file for the system launcher
 - System tray integration via Tauri's tray API
 
+## Implementation Status
+
+### Complete
+- **Layout & shell:** Toolbar, tab bar, main content area, sidebar, status bar — all wired up
+- **Apps tab:** List, click-to-launch, add/edit modal (simple + command modes), icon support, .desktop import, right-click context menu (edit, open directory, pin to sidebar, remove)
+- **Links tab:** Grid with favicons, click to open in browser, add/edit modal, right-click context menu (edit, pin to sidebar, remove)
+- **Servers tab:** List with status dots, start/stop controls, live stdout/stderr log viewer, add/edit modal (simple + command modes), auto-launch flag, right-click context menu (edit, remove)
+- **Sidebar:** Collapsible with toggle button, pinned items (click to launch/open, unpin), status monitor (add/edit/remove via context menu, live up/down/unknown dots, last-check timestamps)
+- **Status bar:** Summary ("All systems online" / "X of Y targets down"), last check timestamp
+- **Menu button:** Hamburger icon, dropdown with Settings / About / Quit
+- **System tray:** Tray icon with server status menu, left-click to restore, minimize-to-tray on close, Quit from tray menu
+- **Theming:** Auto light/dark via `prefers-color-scheme` media query
+- **Desktop notifications:** Status monitor fires notifications on state changes via `@tauri-apps/plugin-notification`
+- **Auto-launch servers** on startup
+
+### Remaining
+- **Settings modal:** Opens but is a placeholder — needs actual controls (default check interval, notification preferences, tray behavior toggle)
+- **About dialog:** Menu item exists but has no content
+- **Drag-and-drop reordering** for links
+- **Servers context menu:** Missing "open containing directory" and "view logs" entries (logs viewable via click-select, but not via context menu)
+- **`.deb` packaging** and `.desktop` file registration
+
 ## Out of Scope (for now)
 
 - Global hotkey / Spotlight-style summoning

@@ -1,4 +1,4 @@
-use crate::config::{save_config, AppEntry, ConfigState, EnvVar, LinkEntry};
+use crate::config::{save_config, AppEntry, ConfigState, EnvVar, LinkEntry, Settings};
 use std::collections::HashMap;
 use std::process::Command;
 use tauri::State;
@@ -419,4 +419,23 @@ pub fn reorder_links(state: State<ConfigState>, ids: Vec<String>) -> Result<(), 
 #[tauri::command]
 pub fn open_link(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("Failed to open URL: {}", e))
+}
+
+// ── Settings ──────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_settings(state: State<ConfigState>) -> Settings {
+    let config = state.0.lock().unwrap();
+    config.settings.clone()
+}
+
+#[tauri::command]
+pub fn update_settings(
+    state: State<ConfigState>,
+    settings: Settings,
+) -> Result<Settings, String> {
+    let mut config = state.0.lock().unwrap();
+    config.settings = settings;
+    save_config(&config)?;
+    Ok(config.settings.clone())
 }

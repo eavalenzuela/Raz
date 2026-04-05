@@ -91,6 +91,36 @@ impl StatusMonitor {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    #[serde(default = "default_check_interval")]
+    pub default_check_interval_secs: u64,
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
+    #[serde(default = "default_true")]
+    pub notify_on_down: bool,
+    #[serde(default = "default_true")]
+    pub notify_on_up: bool,
+    #[serde(default = "default_true")]
+    pub minimize_to_tray: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            default_check_interval_secs: 60,
+            notifications_enabled: true,
+            notify_on_down: true,
+            notify_on_up: true,
+            minimize_to_tray: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RazConfig {
     #[serde(default)]
@@ -103,6 +133,8 @@ pub struct RazConfig {
     pub pinned: Vec<PinnedItem>,
     #[serde(default)]
     pub status_monitors: Vec<StatusMonitor>,
+    #[serde(default)]
+    pub settings: Settings,
 }
 
 pub struct ConfigState(pub Mutex<RazConfig>);
