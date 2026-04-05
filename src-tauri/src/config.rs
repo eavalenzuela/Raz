@@ -22,6 +22,10 @@ pub struct AppEntry {
     pub icon: Option<String>,
     #[serde(default)]
     pub type_label: Option<String>,
+    #[serde(default)]
+    pub launch_count: u64,
+    #[serde(default)]
+    pub last_launched: Option<u64>, // Unix timestamp
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +188,8 @@ impl AppEntry {
             env_vars,
             icon,
             type_label,
+            launch_count: 0,
+            last_launched: None,
         }
     }
 }

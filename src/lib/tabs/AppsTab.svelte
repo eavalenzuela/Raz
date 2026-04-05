@@ -7,6 +7,18 @@
   let showAddModal = $state(false);
   let editingApp = $state(null);
   let contextMenu = $state(null);
+  let searchQuery = $state("");
+  let viewMode = $state("list"); // "list" or "grid"
+  let sortMode = $state("manual"); // "manual", "name", "recent", "most-used"
+  let showBulkImport = $state(false);
+  let desktopCandidates = $state([]);
+  let selectedCandidates = $state(new Set());
+  let bulkSearchQuery = $state("");
+
+  // Drag-and-drop
+  let dragIndex = $state(null);
+  let dropIndex = $state(null);
+  let didDrag = false;
 
   // Form state
   let formMode = $state("simple"); // "simple" or "command"
@@ -35,13 +47,38 @@
         try {
           const data = await invoke("read_icon_base64", { path: app.icon });
           iconCache[app.id] = data;
-          iconCache = iconCache; // trigger reactivity
-        } catch (_) {
-          // Icon not found, will show fallback
-        }
+          iconCache = iconCache;
+        } catch (_) {}
       }
     }
   }
+
+  let filteredApps = $derived.by(() => {
+    let result = [...apps];
+    // Filter
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(a =>
+        a.name.toLowerCase().includes(q) ||
+        (a.type_label && a.type_label.toLowerCase().includes(q))
+      );
+    }
+    // Sort
+    if (sortMode === "name") {
+      result.sort((a, b) => a.name.localeCompare(b.name));
+    } else if (sortMode === "recent") {
+      result.sort((a, b) => (b.last_launched || 0) - (a.last_launched || 0));
+    } else if (sortMode === "most-used") {
+      result.sort((a, b) => (b.launch_count || 0) - (a.launch_count || 0));
+    }
+    return result;
+  });
+
+  let filteredCandidates = $derived.by(() => {
+    if (!bulkSearchQuery.trim()) return desktopCandidates;
+    const q = bulkSearchQuery.toLowerCase();
+    return desktopCandidates.filter(c => c.name.toLowerCase().includes(q));
+  });
 
   function openAddModal() {
     editingApp = null;
@@ -123,28 +160,27 @@
     }
   }
 
-  async function importDesktopFile() {
-    const file = await openDialog({
-      title: "Import .desktop file",
-      filters: [{ name: "Desktop Entry", extensions: ["desktop"] }],
-      multiple: false,
-      directory: false,
-    });
-    if (!file) return;
-    try {
-      await invoke("add_app_from_desktop", { path: file });
-      await loadApps();
-    } catch (e) {
-      console.error("Import failed:", e);
-    }
-  }
-
   async function launchApp(app) {
     try {
       await invoke("launch_app", { id: app.id });
+      // Update local state to reflect launch
+      const a = apps.find(x => x.id === app.id);
+      if (a) {
+        a.launch_count = (a.launch_count || 0) + 1;
+        a.last_launched = Math.floor(Date.now() / 1000);
+        apps = apps;
+      }
     } catch (e) {
       console.error("Launch failed:", e);
     }
+  }
+
+  function handleClick(app) {
+    if (didDrag) {
+      didDrag = false;
+      return;
+    }
+    launchApp(app);
   }
 
   function showContextMenu(event, app) {
@@ -183,6 +219,86 @@
     }
     contextMenu = null;
   }
+
+  // Drag-and-drop reordering
+  function onDragStart(event, index) {
+    if (sortMode !== "manual") return;
+    dragIndex = index;
+    didDrag = true;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(index));
+  }
+
+  function onDragOver(event, index) {
+    if (dragIndex === null) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    dropIndex = index;
+  }
+
+  async function onDrop(event, index) {
+    event.preventDefault();
+    if (dragIndex !== null && dragIndex !== index) {
+      const reordered = [...filteredApps];
+      const [moved] = reordered.splice(dragIndex, 1);
+      reordered.splice(index, 0, moved);
+      apps = reordered;
+      await invoke("reorder_apps", { ids: reordered.map(a => a.id) });
+    }
+    dragIndex = null;
+    dropIndex = null;
+  }
+
+  function onDragEnd() {
+    dragIndex = null;
+    dropIndex = null;
+  }
+
+  // Bulk import
+  async function openBulkImport() {
+    desktopCandidates = await invoke("scan_desktop_files");
+    selectedCandidates = new Set();
+    bulkSearchQuery = "";
+    showBulkImport = true;
+  }
+
+  function toggleCandidate(path) {
+    const next = new Set(selectedCandidates);
+    if (next.has(path)) {
+      next.delete(path);
+    } else {
+      next.add(path);
+    }
+    selectedCandidates = next;
+  }
+
+  function selectAllVisible() {
+    const next = new Set(selectedCandidates);
+    for (const c of filteredCandidates) {
+      next.add(c.path);
+    }
+    selectedCandidates = next;
+  }
+
+  function deselectAll() {
+    selectedCandidates = new Set();
+  }
+
+  async function importSelected() {
+    if (selectedCandidates.size === 0) return;
+    await invoke("bulk_import_desktop", { paths: [...selectedCandidates] });
+    showBulkImport = false;
+    await loadApps();
+  }
+
+  function lastLaunchedLabel(app) {
+    if (!app.last_launched) return "";
+    const secs = Math.floor(Date.now() / 1000) - app.last_launched;
+    if (secs < 60) return "just now";
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+    return `${Math.floor(secs / 86400)}d ago`;
+  }
 </script>
 
 <svelte:window onclick={closeContextMenu} />
@@ -191,23 +307,50 @@
   <div class="tab-header">
     <h2>Apps</h2>
     <div class="header-actions">
-      <button class="add-btn" onclick={importDesktopFile}>Import .desktop</button>
+      <input
+        type="text"
+        class="search-input"
+        placeholder="Search apps..."
+        bind:value={searchQuery}
+      />
+      <select class="sort-select" bind:value={sortMode}>
+        <option value="manual">Manual</option>
+        <option value="name">Name</option>
+        <option value="recent">Recent</option>
+        <option value="most-used">Most Used</option>
+      </select>
+      <div class="view-toggle">
+        <button class:active={viewMode === "list"} onclick={() => viewMode = "list"} title="List view">&#9776;</button>
+        <button class:active={viewMode === "grid"} onclick={() => viewMode = "grid"} title="Grid view">&#9638;</button>
+      </div>
+      <button class="add-btn" onclick={openBulkImport}>Bulk Import</button>
       <button class="add-btn" onclick={openAddModal}>+ Add App</button>
     </div>
   </div>
 
-  {#if apps.length === 0}
+  {#if filteredApps.length === 0}
     <div class="empty-state">
-      <p>No applications configured yet.</p>
-      <p>Click "+ Add App" to add your first application.</p>
+      {#if searchQuery.trim()}
+        <p>No apps match "{searchQuery}".</p>
+      {:else}
+        <p>No applications configured yet.</p>
+        <p>Click "+ Add App" to add your first application.</p>
+      {/if}
     </div>
-  {:else}
+  {:else if viewMode === "list"}
     <div class="app-list">
-      {#each apps as app}
+      {#each filteredApps as app, i}
         <button
           class="app-card"
-          onclick={() => launchApp(app)}
+          class:dragging={dragIndex === i}
+          class:drop-target={dropIndex === i && dragIndex !== i}
+          draggable={sortMode === "manual"}
+          onclick={() => handleClick(app)}
           oncontextmenu={(e) => showContextMenu(e, app)}
+          ondragstart={(e) => onDragStart(e, i)}
+          ondragover={(e) => onDragOver(e, i)}
+          ondrop={(e) => onDrop(e, i)}
+          ondragend={onDragEnd}
         >
           <div class="app-icon">
             {#if iconCache[app.id]}
@@ -223,6 +366,41 @@
             {/if}
             <span class="app-path">{app.raw_command || app.executable || ""}</span>
           </div>
+          {#if app.launch_count > 0}
+            <div class="app-stats">
+              <span class="stat-count">{app.launch_count}x</span>
+              <span class="stat-time">{lastLaunchedLabel(app)}</span>
+            </div>
+          {/if}
+        </button>
+      {/each}
+    </div>
+  {:else}
+    <div class="app-grid">
+      {#each filteredApps as app, i}
+        <button
+          class="app-grid-card"
+          class:dragging={dragIndex === i}
+          class:drop-target={dropIndex === i && dragIndex !== i}
+          draggable={sortMode === "manual"}
+          onclick={() => handleClick(app)}
+          oncontextmenu={(e) => showContextMenu(e, app)}
+          ondragstart={(e) => onDragStart(e, i)}
+          ondragover={(e) => onDragOver(e, i)}
+          ondrop={(e) => onDrop(e, i)}
+          ondragend={onDragEnd}
+        >
+          <div class="grid-icon">
+            {#if iconCache[app.id]}
+              <img src={iconCache[app.id]} alt="" />
+            {:else}
+              {app.name.charAt(0).toUpperCase()}
+            {/if}
+          </div>
+          <span class="grid-name">{app.name}</span>
+          {#if app.type_label}
+            <span class="grid-type">{app.type_label}</span>
+          {/if}
         </button>
       {/each}
     </div>
@@ -317,10 +495,66 @@
   </div>
 {/if}
 
+{#if showBulkImport}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={() => showBulkImport = false} onkeydown={() => {}}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal bulk-modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+      <div class="modal-header">
+        <h2>Import Applications</h2>
+        <button class="close-btn" onclick={() => showBulkImport = false}>&times;</button>
+      </div>
+      <div class="bulk-body">
+        <div class="bulk-toolbar">
+          <input
+            type="text"
+            class="search-input"
+            placeholder="Filter applications..."
+            bind:value={bulkSearchQuery}
+          />
+          <button class="add-btn" onclick={selectAllVisible}>Select All</button>
+          <button class="add-btn" onclick={deselectAll}>Clear</button>
+        </div>
+        <div class="bulk-count">{selectedCandidates.size} selected of {desktopCandidates.length} available</div>
+        <div class="bulk-list">
+          {#each filteredCandidates as candidate}
+            <label class="bulk-item">
+              <input
+                type="checkbox"
+                checked={selectedCandidates.has(candidate.path)}
+                onchange={() => toggleCandidate(candidate.path)}
+              />
+              <span class="bulk-name">{candidate.name}</span>
+              <span class="bulk-exec">{candidate.exec}</span>
+            </label>
+          {/each}
+          {#if filteredCandidates.length === 0}
+            <div class="bulk-empty">
+              {#if bulkSearchQuery.trim()}
+                No applications match "{bulkSearchQuery}".
+              {:else}
+                No new applications found to import.
+              {/if}
+            </div>
+          {/if}
+        </div>
+        <div class="modal-actions">
+          <button class="cancel-btn" onclick={() => showBulkImport = false}>Cancel</button>
+          <button class="save-btn" onclick={importSelected} disabled={selectedCandidates.size === 0}>
+            Import {selectedCandidates.size > 0 ? `(${selectedCandidates.size})` : ""}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   .tab-content {
     padding: 16px;
     height: 100%;
+    display: flex;
+    flex-direction: column;
   }
 
   .tab-header {
@@ -328,6 +562,9 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 16px;
+    flex-shrink: 0;
+    gap: 12px;
+    flex-wrap: wrap;
   }
 
   .tab-header h2 {
@@ -338,6 +575,56 @@
   .header-actions {
     display: flex;
     gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .search-input {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.85em;
+    font-family: inherit;
+    width: 160px;
+  }
+
+  .search-input:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+
+  .sort-select {
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 0.85em;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .view-toggle {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .view-toggle button {
+    padding: 5px 8px;
+    border: none;
+    background: var(--surface);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.85em;
+  }
+
+  .view-toggle button.active {
+    background: var(--accent);
+    color: white;
   }
 
   .add-btn {
@@ -360,7 +647,7 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    height: 50%;
+    flex: 1;
     color: var(--text-muted);
     font-size: 0.95em;
   }
@@ -369,10 +656,13 @@
     margin: 4px 0;
   }
 
+  /* List view */
   .app-list {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    overflow-y: auto;
+    flex: 1;
   }
 
   .app-card {
@@ -393,6 +683,15 @@
 
   .app-card:hover {
     background: var(--hover);
+  }
+
+  .app-card.dragging {
+    opacity: 0.4;
+  }
+
+  .app-card.drop-target {
+    outline: 2px dashed var(--accent);
+    outline-offset: -2px;
   }
 
   .app-icon {
@@ -420,6 +719,7 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+    flex: 1;
   }
 
   .app-name {
@@ -438,6 +738,99 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .app-stats {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    flex-shrink: 0;
+    gap: 2px;
+  }
+
+  .stat-count {
+    font-size: 0.8em;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+
+  .stat-time {
+    font-size: 0.75em;
+    color: var(--text-muted);
+  }
+
+  /* Grid view */
+  .app-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 12px;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .app-grid-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 14px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    cursor: pointer;
+    text-align: center;
+    color: var(--text);
+    font-family: inherit;
+    font-size: inherit;
+    width: 100%;
+  }
+
+  .app-grid-card:hover {
+    background: var(--hover);
+  }
+
+  .app-grid-card.dragging {
+    opacity: 0.4;
+  }
+
+  .app-grid-card.drop-target {
+    outline: 2px dashed var(--accent);
+    outline-offset: -2px;
+  }
+
+  .grid-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 10px;
+    background: var(--accent);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    font-size: 1.3em;
+    overflow: hidden;
+  }
+
+  .grid-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .grid-name {
+    font-weight: 500;
+    font-size: 0.85em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+
+  .grid-type {
+    font-size: 0.75em;
+    color: var(--text-muted);
+    text-transform: capitalize;
   }
 
   /* Context menu */
@@ -498,6 +891,10 @@
     max-height: 80vh;
     overflow-y: auto;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  }
+
+  .bulk-modal {
+    width: 600px;
   }
 
   .modal-header {
@@ -702,5 +1099,90 @@
 
   .save-btn:hover {
     opacity: 0.9;
+  }
+
+  .save-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  /* Bulk import */
+  .bulk-body {
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .bulk-toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .bulk-toolbar .search-input {
+    flex: 1;
+  }
+
+  .bulk-count {
+    font-size: 0.8em;
+    color: var(--text-muted);
+  }
+
+  .bulk-list {
+    max-height: 400px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .bulk-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-weight: 400;
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .bulk-item:last-child {
+    border-bottom: none;
+  }
+
+  .bulk-item:hover {
+    background: var(--hover);
+  }
+
+  .bulk-item input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .bulk-name {
+    font-weight: 500;
+    font-size: 0.9em;
+    flex-shrink: 0;
+  }
+
+  .bulk-exec {
+    font-size: 0.8em;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .bulk-empty {
+    padding: 24px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.9em;
   }
 </style>

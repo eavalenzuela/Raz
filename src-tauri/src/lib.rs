@@ -115,6 +115,8 @@ pub fn run() {
             commands::add_app_from_desktop,
             commands::resolve_icon,
             commands::read_icon_base64,
+            commands::scan_desktop_files,
+            commands::bulk_import_desktop,
             commands::get_links,
             commands::add_link,
             commands::update_link,

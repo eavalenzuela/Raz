@@ -83,36 +83,40 @@ pub fn reorder_apps(state: State<ConfigState>, ids: Vec<String>) -> Result<(), S
 
 #[tauri::command]
 pub fn launch_app(state: State<ConfigState>, id: String) -> Result<(), String> {
-    let config = state.0.lock().unwrap();
+    let mut config = state.0.lock().unwrap();
     let app = config.apps.iter().find(|a| a.id == id).ok_or("App not found")?;
 
     if let Some(ref raw) = app.raw_command {
-        // Raw command mode: execute via shell
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(raw);
-
         if let Some(ref dir) = app.working_directory {
             cmd.current_dir(dir);
         }
-
         cmd.spawn().map_err(|e| format!("Failed to launch: {}", e))?;
     } else if let Some(ref executable) = app.executable {
-        // Structured mode
         let mut cmd = Command::new(executable);
         cmd.args(&app.arguments);
-
         if let Some(ref dir) = app.working_directory {
             cmd.current_dir(dir);
         }
-
         for env in &app.env_vars {
             cmd.env(&env.key, &env.value);
         }
-
         cmd.spawn().map_err(|e| format!("Failed to launch: {}", e))?;
     } else {
         return Err("No command or executable configured".to_string());
     }
+
+    // Track launch stats
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Some(app) = config.apps.iter_mut().find(|a| a.id == id) {
+        app.launch_count += 1;
+        app.last_launched = Some(now);
+    }
+    let _ = save_config(&config);
 
     Ok(())
 }
@@ -354,6 +358,99 @@ pub fn add_app_from_desktop(
     config.apps.push(entry.clone());
     save_config(&config)?;
     Ok(entry)
+}
+
+// ── Bulk Desktop Import ───────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct DesktopCandidate {
+    pub path: String,
+    pub name: String,
+    pub exec: String,
+    pub icon: Option<String>,
+}
+
+#[tauri::command]
+pub fn scan_desktop_files(state: State<ConfigState>) -> Vec<DesktopCandidate> {
+    let config = state.0.lock().unwrap();
+    let existing_names: std::collections::HashSet<String> =
+        config.apps.iter().map(|a| a.name.to_lowercase()).collect();
+
+    let dirs = [
+        "/usr/share/applications",
+        "/usr/local/share/applications",
+    ];
+    let home_apps = dirs::data_dir().map(|d| d.join("applications"));
+
+    let mut candidates = Vec::new();
+
+    let scan_dir = |dir: &std::path::Path, candidates: &mut Vec<DesktopCandidate>, existing: &std::collections::HashSet<String>| {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    // Skip NoDisplay=true entries
+                    if content.lines().any(|l| l.trim() == "NoDisplay=true") {
+                        continue;
+                    }
+                    if let Ok(info) = parse_desktop_file(&content) {
+                        if !existing.contains(&info.name.to_lowercase()) {
+                            candidates.push(DesktopCandidate {
+                                path: path.to_string_lossy().to_string(),
+                                name: info.name,
+                                exec: info.exec,
+                                icon: info.icon,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    for dir in &dirs {
+        scan_dir(std::path::Path::new(dir), &mut candidates, &existing_names);
+    }
+    if let Some(ref home) = home_apps {
+        scan_dir(home, &mut candidates, &existing_names);
+    }
+
+    candidates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    candidates
+}
+
+#[tauri::command]
+pub fn bulk_import_desktop(
+    state: State<ConfigState>,
+    paths: Vec<String>,
+) -> Result<Vec<AppEntry>, String> {
+    let mut config = state.0.lock().unwrap();
+    let mut imported = Vec::new();
+
+    for path in paths {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+        let info = parse_desktop_file(&content)?;
+        let resolved_icon = info.icon.and_then(|i| resolve_icon(i));
+        let entry = AppEntry::new(
+            info.name,
+            Some(info.exec),
+            None,
+            Vec::new(),
+            info.path,
+            Vec::new(),
+            resolved_icon,
+            None,
+        );
+        config.apps.push(entry.clone());
+        imported.push(entry);
+    }
+
+    save_config(&config)?;
+    Ok(imported)
 }
 
 // ── Links ──────────────────────────────────────────────
