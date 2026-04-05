@@ -279,6 +279,26 @@ pub fn get_all_server_statuses(manager: State<ServerManager>) -> Vec<ServerStatu
     statuses
 }
 
+#[tauri::command]
+pub fn open_server_directory(state: State<ConfigState>, id: String) -> Result<(), String> {
+    let config = state.0.lock().unwrap();
+    let server = config.servers.iter().find(|s| s.id == id).ok_or("Server not found")?;
+
+    let dir = if let Some(ref wd) = server.working_directory {
+        std::path::PathBuf::from(wd)
+    } else if let Some(ref exe) = server.executable {
+        std::path::PathBuf::from(exe)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .ok_or("Cannot determine directory")?
+    } else {
+        return Err("No directory or executable path configured".to_string());
+    };
+
+    open::that(&dir).map_err(|e| format!("Failed to open directory: {}", e))?;
+    Ok(())
+}
+
 /// Auto-launch servers marked with auto_launch on startup
 pub fn auto_launch_servers(config: &ConfigState, manager: &ServerManager, app_handle: &AppHandle) {
     let config = config.0.lock().unwrap();

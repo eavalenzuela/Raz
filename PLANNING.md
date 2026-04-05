@@ -138,12 +138,12 @@ Each tab is a dedicated view — no internal sub-grouping within tabs for now.
 - **Theming:** Auto light/dark via `prefers-color-scheme` media query
 - **Desktop notifications:** Status monitor fires notifications on state changes via `@tauri-apps/plugin-notification`
 - **Auto-launch servers** on startup
+- **Settings modal:** Controls for default check interval, notification preferences (enabled, on-down, on-up), minimize-to-tray toggle — all persisted
+- **About dialog:** Version, description, and tech stack info
+- **Servers context menu:** Edit, Open Directory, View Logs, Remove
 
 ### Remaining
-- **Settings modal:** Opens but is a placeholder — needs actual controls (default check interval, notification preferences, tray behavior toggle)
-- **About dialog:** Menu item exists but has no content
 - **Drag-and-drop reordering** for links
-- **Servers context menu:** Missing "open containing directory" and "view logs" entries (logs viewable via click-select, but not via context menu)
 - **`.deb` packaging** and `.desktop` file registration
 
 ## Out of Scope (for now)

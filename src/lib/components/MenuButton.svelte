@@ -3,6 +3,7 @@
 
   let showMenu = $state(false);
   let settingsOpen = $state(false);
+  let aboutOpen = $state(false);
 
   // Settings form state
   let defaultCheckInterval = $state(60);
@@ -64,12 +65,33 @@
     <div class="menu-backdrop" onclick={closeMenu} onkeydown={() => {}}></div>
     <div class="menu-dropdown">
       <button onclick={openSettings}>Settings</button>
-      <button onclick={closeMenu}>About</button>
+      <button onclick={() => { aboutOpen = true; closeMenu(); }}>About</button>
       <hr />
       <button onclick={quitApp}>Quit</button>
     </div>
   {/if}
 </div>
+
+{#if aboutOpen}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={() => aboutOpen = false} onkeydown={() => {}}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal about-modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+      <div class="modal-header">
+        <h2>About Raz</h2>
+        <button class="close-btn" onclick={() => aboutOpen = false}>&times;</button>
+      </div>
+      <div class="about-body">
+        <div class="about-title">Raz</div>
+        <div class="about-version">v0.1.0</div>
+        <p class="about-description">A minimal personal launcher and homepage for launching apps, bookmarking links, and monitoring system and service status.</p>
+        <div class="about-meta">
+          <span>Built with Tauri v2 + Svelte</span>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if settingsOpen}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -327,5 +349,38 @@
 
   .save-btn:hover {
     opacity: 0.9;
+  }
+
+  /* About modal */
+  .about-modal {
+    width: 360px;
+  }
+
+  .about-body {
+    padding: 24px 20px;
+    text-align: center;
+  }
+
+  .about-title {
+    font-size: 1.4em;
+    font-weight: 600;
+  }
+
+  .about-version {
+    font-size: 0.85em;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
+  .about-description {
+    font-size: 0.9em;
+    color: var(--text);
+    margin: 16px 0;
+    line-height: 1.5;
+  }
+
+  .about-meta {
+    font-size: 0.8em;
+    color: var(--text-muted);
   }
 </style>

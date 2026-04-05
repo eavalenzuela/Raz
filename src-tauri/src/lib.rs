@@ -129,6 +129,7 @@ pub fn run() {
             servers::stop_server,
             servers::get_server_output,
             servers::get_all_server_statuses,
+            servers::open_server_directory,
             sidebar::get_pinned,
             sidebar::pin_item,
             sidebar::unpin_item,

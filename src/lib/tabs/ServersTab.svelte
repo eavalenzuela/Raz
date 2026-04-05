@@ -172,6 +172,20 @@
     }
     await loadServers();
   }
+
+  async function openDirectory(server) {
+    try {
+      await invoke("open_server_directory", { id: server.id });
+    } catch (e) {
+      console.error("Failed to open directory:", e);
+    }
+    contextMenu = null;
+  }
+
+  function viewLogs(server) {
+    selectServer(server);
+    contextMenu = null;
+  }
 </script>
 
 <svelte:window onclick={closeContextMenu} />
@@ -241,6 +255,8 @@
 {#if contextMenu}
   <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
     <button onclick={() => openEditModal(contextMenu.server)}>Edit</button>
+    <button onclick={() => openDirectory(contextMenu.server)}>Open Directory</button>
+    <button onclick={() => viewLogs(contextMenu.server)}>View Logs</button>
     <hr />
     <button class="danger" onclick={() => removeServer(contextMenu.server)}>Remove</button>
   </div>
