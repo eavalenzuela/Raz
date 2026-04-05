@@ -4,6 +4,11 @@ use std::process::Command;
 use tauri::State;
 
 #[tauri::command]
+pub fn quit_app() {
+    std::process::exit(0);
+}
+
+#[tauri::command]
 pub fn get_apps(state: State<ConfigState>) -> Vec<AppEntry> {
     let config = state.0.lock().unwrap();
     config.apps.clone()

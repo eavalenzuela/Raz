@@ -12,7 +12,7 @@ pub struct ServerStatus {
 }
 
 pub struct RunningServer {
-    child: Child,
+    pub(crate) child: Child,
     output: Arc<Mutex<Vec<String>>>,
 }
 
@@ -117,6 +117,7 @@ pub fn get_servers(state: State<ConfigState>) -> Vec<ServerEntry> {
 #[tauri::command]
 pub fn add_server(
     state: State<ConfigState>,
+    app_handle: AppHandle,
     name: String,
     raw_command: Option<String>,
     executable: Option<String>,
@@ -125,16 +126,21 @@ pub fn add_server(
     env_vars: Vec<EnvVar>,
     auto_launch: bool,
 ) -> Result<ServerEntry, String> {
-    let mut config = state.0.lock().unwrap();
-    let entry = ServerEntry::new(name, raw_command, executable, arguments, working_directory, env_vars, auto_launch);
-    config.servers.push(entry.clone());
-    save_config(&config)?;
+    let entry = {
+        let mut config = state.0.lock().unwrap();
+        let entry = ServerEntry::new(name, raw_command, executable, arguments, working_directory, env_vars, auto_launch);
+        config.servers.push(entry.clone());
+        save_config(&config)?;
+        entry
+    };
+    let _ = app_handle.emit("tray-update", ());
     Ok(entry)
 }
 
 #[tauri::command]
 pub fn update_server(
     state: State<ConfigState>,
+    app_handle: AppHandle,
     id: String,
     name: String,
     raw_command: Option<String>,
@@ -144,17 +150,21 @@ pub fn update_server(
     env_vars: Vec<EnvVar>,
     auto_launch: bool,
 ) -> Result<ServerEntry, String> {
-    let mut config = state.0.lock().unwrap();
-    let server = config.servers.iter_mut().find(|s| s.id == id).ok_or("Server not found")?;
-    server.name = name;
-    server.raw_command = raw_command;
-    server.executable = executable;
-    server.arguments = arguments;
-    server.working_directory = working_directory;
-    server.env_vars = env_vars;
-    server.auto_launch = auto_launch;
-    let updated = server.clone();
-    save_config(&config)?;
+    let updated = {
+        let mut config = state.0.lock().unwrap();
+        let server = config.servers.iter_mut().find(|s| s.id == id).ok_or("Server not found")?;
+        server.name = name;
+        server.raw_command = raw_command;
+        server.executable = executable;
+        server.arguments = arguments;
+        server.working_directory = working_directory;
+        server.env_vars = env_vars;
+        server.auto_launch = auto_launch;
+        let updated = server.clone();
+        save_config(&config)?;
+        updated
+    };
+    let _ = app_handle.emit("tray-update", ());
     Ok(updated)
 }
 
@@ -162,18 +172,22 @@ pub fn update_server(
 pub fn remove_server(
     state: State<ConfigState>,
     manager: State<ServerManager>,
+    app_handle: AppHandle,
     id: String,
 ) -> Result<(), String> {
-    // Stop if running
     {
         let mut running = manager.0.lock().unwrap();
         if let Some(mut server) = running.remove(&id) {
             let _ = server.child.kill();
         }
     }
-    let mut config = state.0.lock().unwrap();
-    config.servers.retain(|s| s.id != id);
-    save_config(&config)
+    {
+        let mut config = state.0.lock().unwrap();
+        config.servers.retain(|s| s.id != id);
+        save_config(&config)?;
+    }
+    let _ = app_handle.emit("tray-update", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -183,26 +197,34 @@ pub fn start_server(
     app_handle: AppHandle,
     id: String,
 ) -> Result<(), String> {
-    let config = state.0.lock().unwrap();
-    let entry = config.servers.iter().find(|s| s.id == id).ok_or("Server not found")?;
+    let entry = {
+        let config = state.0.lock().unwrap();
+        config.servers.iter().find(|s| s.id == id).ok_or("Server not found")?.clone()
+    };
 
-    let running_server = spawn_server(entry, &app_handle)?;
+    let running_server = spawn_server(&entry, &app_handle)?;
 
-    let mut running = manager.0.lock().unwrap();
-    running.insert(id, running_server);
+    {
+        let mut running = manager.0.lock().unwrap();
+        running.insert(id, running_server);
+    }
+    let _ = app_handle.emit("tray-update", ());
     Ok(())
 }
 
 #[tauri::command]
-pub fn stop_server(manager: State<ServerManager>, id: String) -> Result<(), String> {
-    let mut running = manager.0.lock().unwrap();
-    if let Some(mut server) = running.remove(&id) {
-        server.child.kill().map_err(|e| format!("Failed to stop: {}", e))?;
-        let _ = server.child.wait();
-        Ok(())
-    } else {
-        Err("Server is not running".to_string())
+pub fn stop_server(manager: State<ServerManager>, app_handle: AppHandle, id: String) -> Result<(), String> {
+    {
+        let mut running = manager.0.lock().unwrap();
+        if let Some(mut server) = running.remove(&id) {
+            server.child.kill().map_err(|e| format!("Failed to stop: {}", e))?;
+            let _ = server.child.wait();
+        } else {
+            return Err("Server is not running".to_string());
+        }
     }
+    let _ = app_handle.emit("tray-update", ());
+    Ok(())
 }
 
 #[tauri::command]

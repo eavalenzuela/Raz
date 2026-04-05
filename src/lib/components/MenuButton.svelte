@@ -1,4 +1,6 @@
 <script>
+  import { invoke } from "@tauri-apps/api/core";
+
   let showMenu = $state(false);
   let settingsOpen = $state(false);
 
@@ -13,6 +15,10 @@
   function openSettings() {
     settingsOpen = true;
     closeMenu();
+  }
+
+  async function quitApp() {
+    await invoke("quit_app");
   }
 </script>
 
@@ -32,7 +38,7 @@
       <button onclick={openSettings}>Settings</button>
       <button onclick={closeMenu}>About</button>
       <hr />
-      <button onclick={closeMenu}>Quit</button>
+      <button onclick={quitApp}>Quit</button>
     </div>
   {/if}
 </div>
