@@ -68,6 +68,15 @@
     contextMenu = null;
   }
 
+  async function pinLink(link) {
+    try {
+      await invoke("pin_item", { sourceId: link.id, sourceType: "link", name: link.name });
+    } catch (e) {
+      console.error("Pin failed:", e);
+    }
+    contextMenu = null;
+  }
+
   async function removeLink(link) {
     await invoke("remove_link", { id: link.id });
     contextMenu = null;
@@ -133,6 +142,7 @@
 {#if contextMenu}
   <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
     <button onclick={() => openEditModal(contextMenu.link)}>Edit</button>
+    <button onclick={() => pinLink(contextMenu.link)}>Pin to Sidebar</button>
     <hr />
     <button class="danger" onclick={() => removeLink(contextMenu.link)}>Remove</button>
   </div>

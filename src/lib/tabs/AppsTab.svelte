@@ -166,6 +166,15 @@
     await loadApps();
   }
 
+  async function pinApp(app) {
+    try {
+      await invoke("pin_item", { sourceId: app.id, sourceType: "app", name: app.name });
+    } catch (e) {
+      console.error("Pin failed:", e);
+    }
+    contextMenu = null;
+  }
+
   async function openDirectory(app) {
     try {
       await invoke("open_app_directory", { id: app.id });
@@ -224,6 +233,7 @@
   <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
     <button onclick={() => openEditModal(contextMenu.app)}>Edit</button>
     <button onclick={() => openDirectory(contextMenu.app)}>Open Directory</button>
+    <button onclick={() => pinApp(contextMenu.app)}>Pin to Sidebar</button>
     <hr />
     <button class="danger" onclick={() => removeApp(contextMenu.app)}>Remove</button>
   </div>

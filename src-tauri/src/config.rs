@@ -57,6 +57,40 @@ pub struct ServerEntry {
     pub auto_launch: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinnedItem {
+    pub id: String,
+    pub source_id: String,
+    pub source_type: String, // "app" or "link"
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusMonitor {
+    pub id: String,
+    pub name: String,
+    pub target: String,
+    pub check_type: String, // "http" or "ping"
+    #[serde(default = "default_check_interval")]
+    pub check_interval_secs: u64,
+}
+
+fn default_check_interval() -> u64 {
+    60
+}
+
+impl StatusMonitor {
+    pub fn new(name: String, target: String, check_type: String, check_interval_secs: u64) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name,
+            target,
+            check_type,
+            check_interval_secs,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RazConfig {
     #[serde(default)]
@@ -65,6 +99,10 @@ pub struct RazConfig {
     pub links: Vec<LinkEntry>,
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
+    #[serde(default)]
+    pub pinned: Vec<PinnedItem>,
+    #[serde(default)]
+    pub status_monitors: Vec<StatusMonitor>,
 }
 
 pub struct ConfigState(pub Mutex<RazConfig>);
