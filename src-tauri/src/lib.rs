@@ -123,6 +123,8 @@ pub fn run() {
             commands::remove_link,
             commands::reorder_links,
             commands::open_link,
+            commands::fetch_favicon,
+            commands::fetch_url_metadata,
             servers::get_servers,
             servers::add_server,
             servers::update_server,

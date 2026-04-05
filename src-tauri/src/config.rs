@@ -41,6 +41,8 @@ pub struct LinkEntry {
     pub url: String,
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default)]
+    pub folder: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,12 +220,13 @@ impl ServerEntry {
 }
 
 impl LinkEntry {
-    pub fn new(name: String, url: String, icon: Option<String>) -> Self {
+    pub fn new(name: String, url: String, icon: Option<String>, folder: Option<String>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             name,
             url,
             icon,
+            folder,
         }
     }
 }

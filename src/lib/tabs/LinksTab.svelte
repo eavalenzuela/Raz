@@ -6,16 +6,102 @@
   let showModal = $state(false);
   let editingLink = $state(null);
   let contextMenu = $state(null);
+  let collapsedFolders = $state(new Set());
+
+  // Icon cache: link id -> local base64 data URL
+  let iconCache = $state({});
 
   // Form state
   let formName = $state("");
   let formUrl = $state("");
   let formIcon = $state("");
+  let formFolder = $state("");
+  let fetchingTitle = $state(false);
 
   onMount(loadLinks);
 
   async function loadLinks() {
     links = await invoke("get_links");
+    cacheFavicons();
+  }
+
+  async function cacheFavicons() {
+    for (const link of links) {
+      if (iconCache[link.id]) continue;
+      if (link.icon) {
+        // If icon is a local file path, load as base64
+        if (link.icon.startsWith("/")) {
+          try {
+            const data = await invoke("read_icon_base64", { path: link.icon });
+            iconCache[link.id] = data;
+            iconCache = iconCache;
+          } catch (_) {}
+        } else {
+          // External URL, use directly
+          iconCache[link.id] = link.icon;
+        }
+      } else {
+        // Fetch and cache favicon via backend
+        try {
+          const path = await invoke("fetch_favicon", { url: link.url });
+          const data = await invoke("read_icon_base64", { path });
+          iconCache[link.id] = data;
+          iconCache = iconCache;
+          // Save the cached path to the link
+          await invoke("update_link", {
+            id: link.id,
+            name: link.name,
+            url: link.url,
+            icon: path,
+            folder: link.folder || null,
+          });
+        } catch (_) {}
+      }
+    }
+  }
+
+  // Group links by folder
+  let groupedLinks = $derived.by(() => {
+    const groups = [];
+    const folderMap = new Map();
+    const unfiled = [];
+
+    for (const link of links) {
+      const folder = link.folder || null;
+      if (folder) {
+        if (!folderMap.has(folder)) {
+          folderMap.set(folder, []);
+        }
+        folderMap.get(folder).push(link);
+      } else {
+        unfiled.push(link);
+      }
+    }
+
+    // Folders first (sorted), then unfiled
+    const sortedFolders = [...folderMap.keys()].sort((a, b) => a.localeCompare(b));
+    for (const name of sortedFolders) {
+      groups.push({ folder: name, links: folderMap.get(name) });
+    }
+    if (unfiled.length > 0) {
+      groups.push({ folder: null, links: unfiled });
+    }
+
+    return groups;
+  });
+
+  let existingFolders = $derived(
+    [...new Set(links.map(l => l.folder).filter(Boolean))].sort()
+  );
+
+  function toggleFolder(name) {
+    const next = new Set(collapsedFolders);
+    if (next.has(name)) {
+      next.delete(name);
+    } else {
+      next.add(name);
+    }
+    collapsedFolders = next;
   }
 
   function openAddModal() {
@@ -29,6 +115,7 @@
     formName = link.name;
     formUrl = link.url;
     formIcon = link.icon || "";
+    formFolder = link.folder || "";
     showModal = true;
     contextMenu = null;
   }
@@ -37,14 +124,29 @@
     formName = "";
     formUrl = "";
     formIcon = "";
+    formFolder = "";
+    fetchingTitle = false;
+  }
+
+  async function onUrlBlur() {
+    if (!formUrl.trim() || formName.trim() || editingLink) return;
+    fetchingTitle = true;
+    try {
+      const title = await invoke("fetch_url_metadata", { url: formUrl });
+      if (!formName.trim()) {
+        formName = title;
+      }
+    } catch (_) {}
+    fetchingTitle = false;
   }
 
   async function saveLink() {
     const icon = formIcon || null;
+    const folder = formFolder.trim() || null;
     if (editingLink) {
-      await invoke("update_link", { id: editingLink.id, name: formName, url: formUrl, icon });
+      await invoke("update_link", { id: editingLink.id, name: formName, url: formUrl, icon, folder });
     } else {
-      await invoke("add_link", { name: formName, url: formUrl, icon });
+      await invoke("add_link", { name: formName, url: formUrl, icon, folder });
     }
     showModal = false;
     resetForm();
@@ -88,27 +190,31 @@
   let dropIndex = $state(null);
   let didDrag = false;
 
-  function onDragStart(event, index) {
-    dragIndex = index;
-    didDrag = true;
-    event.dataTransfer.effectAllowed = "move";
-    // Required for Firefox
-    event.dataTransfer.setData("text/plain", String(index));
+  function flatIndex(link) {
+    return links.findIndex(l => l.id === link.id);
   }
 
-  function onDragOver(event, index) {
+  function onDragStart(event, link) {
+    dragIndex = flatIndex(link);
+    didDrag = true;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(dragIndex));
+  }
+
+  function onDragOver(event, link) {
     if (dragIndex === null) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
-    dropIndex = index;
+    dropIndex = flatIndex(link);
   }
 
-  async function onDrop(event, index) {
+  async function onDrop(event, link) {
     event.preventDefault();
-    if (dragIndex !== null && dragIndex !== index) {
+    const target = flatIndex(link);
+    if (dragIndex !== null && dragIndex !== target) {
       const reordered = [...links];
       const [moved] = reordered.splice(dragIndex, 1);
-      reordered.splice(index, 0, moved);
+      reordered.splice(target, 0, moved);
       links = reordered;
       await invoke("reorder_links", { ids: reordered.map(l => l.id) });
     }
@@ -127,15 +233,6 @@
       return;
     }
     openLink(link);
-  }
-
-  function faviconUrl(url) {
-    try {
-      const u = new URL(url);
-      return `https://www.google.com/s2/favicons?domain=${u.hostname}&sz=64`;
-    } catch {
-      return null;
-    }
   }
 
   function domainFromUrl(url) {
@@ -161,34 +258,70 @@
       <p>Click "+ Add Link" to add your first bookmark.</p>
     </div>
   {:else}
-    <div class="link-grid">
-      {#each links as link, i}
-        <button
-          class="link-card"
-          class:dragging={dragIndex === i}
-          class:drop-target={dropIndex === i && dragIndex !== i}
-          draggable="true"
-          onclick={() => handleClick(link)}
-          oncontextmenu={(e) => showContextMenu(e, link)}
-          ondragstart={(e) => onDragStart(e, i)}
-          ondragover={(e) => onDragOver(e, i)}
-          ondrop={(e) => onDrop(e, i)}
-          ondragend={onDragEnd}
-        >
-          <div class="link-icon">
-            {#if link.icon}
-              <img src={link.icon} alt="" onerror={(e) => e.target.style.display='none'} />
-            {:else}
-              {#if faviconUrl(link.url)}
-                <img src={faviconUrl(link.url)} alt="" onerror={(e) => e.target.style.display='none'} />
-              {/if}
-            {/if}
-          </div>
-          <span class="link-name">{link.name}</span>
-          <span class="link-domain">{domainFromUrl(link.url)}</span>
-        </button>
-      {/each}
-    </div>
+    {#each groupedLinks as group}
+      {#if group.folder}
+        <div class="folder-section">
+          <button class="folder-header" onclick={() => toggleFolder(group.folder)}>
+            <span class="folder-arrow">{collapsedFolders.has(group.folder) ? "\u25B6" : "\u25BC"}</span>
+            <span class="folder-name">{group.folder}</span>
+            <span class="folder-count">{group.links.length}</span>
+          </button>
+          {#if !collapsedFolders.has(group.folder)}
+            <div class="link-grid">
+              {#each group.links as link}
+                {@const fi = flatIndex(link)}
+                <button
+                  class="link-card"
+                  class:dragging={dragIndex === fi}
+                  class:drop-target={dropIndex === fi && dragIndex !== fi}
+                  draggable="true"
+                  onclick={() => handleClick(link)}
+                  oncontextmenu={(e) => showContextMenu(e, link)}
+                  ondragstart={(e) => onDragStart(e, link)}
+                  ondragover={(e) => onDragOver(e, link)}
+                  ondrop={(e) => onDrop(e, link)}
+                  ondragend={onDragEnd}
+                >
+                  <div class="link-icon">
+                    {#if iconCache[link.id]}
+                      <img src={iconCache[link.id]} alt="" onerror={(e) => e.target.style.display='none'} />
+                    {/if}
+                  </div>
+                  <span class="link-name">{link.name}</span>
+                  <span class="link-domain">{domainFromUrl(link.url)}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {:else}
+        <div class="link-grid">
+          {#each group.links as link}
+            {@const fi = flatIndex(link)}
+            <button
+              class="link-card"
+              class:dragging={dragIndex === fi}
+              class:drop-target={dropIndex === fi && dragIndex !== fi}
+              draggable="true"
+              onclick={() => handleClick(link)}
+              oncontextmenu={(e) => showContextMenu(e, link)}
+              ondragstart={(e) => onDragStart(e, link)}
+              ondragover={(e) => onDragOver(e, link)}
+              ondrop={(e) => onDrop(e, link)}
+              ondragend={onDragEnd}
+            >
+              <div class="link-icon">
+                {#if iconCache[link.id]}
+                  <img src={iconCache[link.id]} alt="" onerror={(e) => e.target.style.display='none'} />
+                {/if}
+              </div>
+              <span class="link-name">{link.name}</span>
+              <span class="link-domain">{domainFromUrl(link.url)}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    {/each}
   {/if}
 </div>
 
@@ -212,18 +345,28 @@
       </div>
       <form class="modal-body" onsubmit={(e) => { e.preventDefault(); saveLink(); }}>
         <label>
-          Name
+          URL
+          <input type="text" bind:value={formUrl} required placeholder="https://google.com" onblur={onUrlBlur} />
+        </label>
+
+        <label>
+          Name {#if fetchingTitle}<span class="hint">(fetching...)</span>{/if}
           <input type="text" bind:value={formName} required placeholder="Google" />
         </label>
 
         <label>
-          URL
-          <input type="text" bind:value={formUrl} required placeholder="https://google.com" />
+          Folder <span class="hint">(optional)</span>
+          <input type="text" bind:value={formFolder} placeholder="Type or pick a folder" list="folder-list" />
+          <datalist id="folder-list">
+            {#each existingFolders as f}
+              <option value={f} />
+            {/each}
+          </datalist>
         </label>
 
         <label>
-          Icon URL <span class="hint">(optional — auto-fetches favicon if empty)</span>
-          <input type="text" bind:value={formIcon} placeholder="https://example.com/icon.png" />
+          Icon <span class="hint">(optional — auto-fetches favicon if empty)</span>
+          <input type="text" bind:value={formIcon} placeholder="/path/to/icon.png or URL" />
         </label>
 
         <div class="modal-actions">
@@ -239,6 +382,7 @@
   .tab-content {
     padding: 16px;
     height: 100%;
+    overflow-y: auto;
   }
 
   .tab-header {
@@ -282,10 +426,54 @@
     margin: 4px 0;
   }
 
+  /* Folder sections */
+  .folder-section {
+    margin-bottom: 16px;
+  }
+
+  .folder-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 4px;
+    background: none;
+    cursor: pointer;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.9em;
+    font-weight: 500;
+    width: 100%;
+    text-align: left;
+    margin-bottom: 8px;
+  }
+
+  .folder-header:hover {
+    background: var(--hover);
+  }
+
+  .folder-arrow {
+    font-size: 0.7em;
+    color: var(--text-muted);
+    width: 12px;
+  }
+
+  .folder-name {
+    flex: 1;
+  }
+
+  .folder-count {
+    font-size: 0.8em;
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+
   .link-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 12px;
+    margin-bottom: 12px;
   }
 
   .link-card {

@@ -467,9 +467,10 @@ pub fn add_link(
     name: String,
     url: String,
     icon: Option<String>,
+    folder: Option<String>,
 ) -> Result<LinkEntry, String> {
     let mut config = state.0.lock().unwrap();
-    let entry = LinkEntry::new(name, url, icon);
+    let entry = LinkEntry::new(name, url, icon, folder);
     config.links.push(entry.clone());
     save_config(&config)?;
     Ok(entry)
@@ -482,15 +483,85 @@ pub fn update_link(
     name: String,
     url: String,
     icon: Option<String>,
+    folder: Option<String>,
 ) -> Result<LinkEntry, String> {
     let mut config = state.0.lock().unwrap();
     let link = config.links.iter_mut().find(|l| l.id == id).ok_or("Link not found")?;
     link.name = name;
     link.url = url;
     link.icon = icon;
+    link.folder = folder;
     let updated = link.clone();
     save_config(&config)?;
     Ok(updated)
+}
+
+#[tauri::command]
+pub fn fetch_favicon(url: String) -> Result<String, String> {
+    let hostname = url::Url::parse(&url)
+        .map_err(|e| format!("Invalid URL: {}", e))?
+        .host_str()
+        .ok_or("No host in URL")?
+        .to_string();
+
+    let cache_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("raz")
+        .join("favicons");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+
+    let dest = cache_dir.join(format!("{}.png", hostname));
+
+    // Return cached if exists
+    if dest.exists() {
+        return Ok(dest.to_string_lossy().to_string());
+    }
+
+    // Try Google favicon service
+    let favicon_url = format!("https://www.google.com/s2/favicons?domain={}&sz=64", hostname);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.get(&favicon_url).send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err("Failed to fetch favicon".to_string());
+    }
+
+    let bytes = resp.bytes().map_err(|e| e.to_string())?;
+    std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn fetch_url_metadata(url: String) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.get(&url).send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err("Failed to fetch URL".to_string());
+    }
+
+    let body = resp.text().map_err(|e| e.to_string())?;
+
+    // Extract <title>
+    if let Some(start) = body.find("<title>").or_else(|| body.find("<Title>")).or_else(|| body.find("<TITLE>")) {
+        let after = &body[start + 7..];
+        if let Some(end) = after.find("</title>").or_else(|| after.find("</Title>")).or_else(|| after.find("</TITLE>")) {
+            let title = after[..end].trim().to_string();
+            if !title.is_empty() {
+                return Ok(title);
+            }
+        }
+    }
+
+    Err("No title found".to_string())
 }
 
 #[tauri::command]
