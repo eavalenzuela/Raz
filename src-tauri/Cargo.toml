@@ -1,6 +1,6 @@
 [package]
 name = "raz"
-version = "0.1.0"
+version = "1.0.0"
 description = "Personal launcher and embedded homepage"
 authors = ["t3rmit3"]
 edition = "2021"

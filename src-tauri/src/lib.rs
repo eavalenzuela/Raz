@@ -140,6 +140,7 @@ pub fn run() {
             sidebar::get_monitor_statuses,
             commands::get_settings,
             commands::update_settings,
+            commands::create_desktop_entry,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

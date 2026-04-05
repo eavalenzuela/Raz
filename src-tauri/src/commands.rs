@@ -421,6 +421,78 @@ pub fn open_link(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("Failed to open URL: {}", e))
 }
 
+// ── Desktop Entry ─────────────────────────────────────
+
+#[tauri::command]
+pub fn create_desktop_entry() -> Result<String, String> {
+    // Prefer the installed path; fall back to current executable
+    let installed = std::path::PathBuf::from("/usr/bin/raz");
+    let exe_path = if installed.exists() {
+        installed
+    } else {
+        std::env::current_exe()
+            .map_err(|e| format!("Cannot determine executable path: {}", e))?
+    };
+
+    // Copy icon to ~/.local/share/icons/
+    let data_dir = dirs::data_dir().ok_or("Cannot determine data directory")?;
+    let icon_dir = data_dir.join("icons");
+    std::fs::create_dir_all(&icon_dir).map_err(|e| format!("Failed to create icon dir: {}", e))?;
+    let icon_dest = icon_dir.join("raz.png");
+    let icon_bytes = include_bytes!("../icons/128x128.png");
+    std::fs::write(&icon_dest, icon_bytes).map_err(|e| format!("Failed to write icon: {}", e))?;
+
+    // Write .desktop file
+    let apps_dir = data_dir.join("applications");
+    std::fs::create_dir_all(&apps_dir).map_err(|e| format!("Failed to create applications dir: {}", e))?;
+    let desktop_path = apps_dir.join("raz.desktop");
+
+    let content = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Raz\n\
+         Comment=Personal launcher and homepage\n\
+         Exec={}\n\
+         Icon={}\n\
+         Terminal=false\n\
+         Categories=Utility;\n\
+         StartupWMClass=raz\n",
+        exe_path.display(),
+        icon_dest.display(),
+    );
+
+    std::fs::write(&desktop_path, &content)
+        .map_err(|e| format!("Failed to write .desktop file: {}", e))?;
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&desktop_path, perms)
+            .map_err(|e| format!("Failed to set permissions: {}", e))?;
+    }
+
+    // Also copy to ~/Desktop/ if it exists
+    if let Some(home) = dirs::home_dir() {
+        let desktop_dir = home.join("Desktop");
+        if desktop_dir.is_dir() {
+            let desktop_shortcut = desktop_dir.join("raz.desktop");
+            std::fs::write(&desktop_shortcut, &content)
+                .map_err(|e| format!("Failed to write desktop shortcut: {}", e))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o755);
+                std::fs::set_permissions(&desktop_shortcut, perms)
+                    .map_err(|e| format!("Failed to set permissions: {}", e))?;
+            }
+        }
+    }
+
+    Ok("Desktop icon created".to_string())
+}
+
 // ── Settings ──────────────────────────────────────────
 
 #[tauri::command]

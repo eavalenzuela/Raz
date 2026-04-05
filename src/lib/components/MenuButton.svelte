@@ -46,6 +46,19 @@
     settingsOpen = false;
   }
 
+  async function createDesktopEntry() {
+    closeMenu();
+    try {
+      const path = await invoke("create_desktop_entry");
+      desktopMsg = `Created: ${path}`;
+    } catch (e) {
+      desktopMsg = `Error: ${e}`;
+    }
+    setTimeout(() => desktopMsg = null, 4000);
+  }
+
+  let desktopMsg = $state(null);
+
   async function quitApp() {
     await invoke("quit_app");
   }
@@ -65,12 +78,17 @@
     <div class="menu-backdrop" onclick={closeMenu} onkeydown={() => {}}></div>
     <div class="menu-dropdown">
       <button onclick={openSettings}>Settings</button>
+      <button onclick={createDesktopEntry}>Create Desktop Icon</button>
       <button onclick={() => { aboutOpen = true; closeMenu(); }}>About</button>
       <hr />
       <button onclick={quitApp}>Quit</button>
     </div>
   {/if}
 </div>
+
+{#if desktopMsg}
+  <div class="toast">{desktopMsg}</div>
+{/if}
 
 {#if aboutOpen}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -83,7 +101,7 @@
       </div>
       <div class="about-body">
         <div class="about-title">Raz</div>
-        <div class="about-version">v0.1.0</div>
+        <div class="about-version">v1.0.0</div>
         <p class="about-description">A minimal personal launcher and homepage for launching apps, bookmarking links, and monitoring system and service status.</p>
         <div class="about-meta">
           <span>Built with Tauri v2 + Svelte</span>
@@ -349,6 +367,22 @@
 
   .save-btn:hover {
     opacity: 0.9;
+  }
+
+  /* Toast */
+  .toast {
+    position: fixed;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 0.85em;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 500;
+    white-space: nowrap;
   }
 
   /* About modal */

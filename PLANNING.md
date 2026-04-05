@@ -143,7 +143,6 @@ Each tab is a dedicated view — no internal sub-grouping within tabs for now.
 - **Servers context menu:** Edit, Open Directory, View Logs, Remove
 
 ### Remaining
-- **Drag-and-drop reordering** for links
 - **`.deb` packaging** and `.desktop` file registration
 
 ## Out of Scope (for now)
