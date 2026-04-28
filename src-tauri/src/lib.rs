@@ -12,42 +12,23 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{image::Image, Listener, Manager, WindowEvent};
 
 fn build_tray_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    // Collect server info while holding locks, then drop before building menu items
+    // The background watcher in servers.rs reaps crashed processes; here we
+    // just snapshot which ids are currently in the running map.
     let server_info: Vec<(String, String, String)> = {
         let config_state = app.try_state::<ConfigState>().unwrap();
         let manager = app.try_state::<ServerManager>().unwrap();
         let config = config_state.0.lock().unwrap();
-
-        let mut status_map = std::collections::HashMap::new();
-        {
-            let mut running = manager.0.lock().unwrap();
-            let mut crashed = Vec::new();
-            for (id, server) in running.iter_mut() {
-                match server.child.try_wait() {
-                    Ok(Some(_)) => {
-                        crashed.push(id.clone());
-                        status_map.insert(id.clone(), "crashed");
-                    }
-                    Ok(None) => {
-                        status_map.insert(id.clone(), "running");
-                    }
-                    Err(_) => {
-                        crashed.push(id.clone());
-                        status_map.insert(id.clone(), "crashed");
-                    }
-                }
-            }
-            for id in crashed {
-                running.remove(&id);
-            }
-        }
-
-        config.servers.iter().map(|s| {
-            let state = status_map.get(&s.id).map(|s| s.to_string()).unwrap_or_else(|| "stopped".to_string());
-            (s.id.clone(), s.name.clone(), state)
-        }).collect()
+        let running = manager.0.lock().unwrap();
+        let running_ids: std::collections::HashSet<String> = running.keys().cloned().collect();
+        config
+            .servers
+            .iter()
+            .map(|s| {
+                let state = if running_ids.contains(&s.id) { "running" } else { "stopped" };
+                (s.id.clone(), s.name.clone(), state.to_string())
+            })
+            .collect()
     };
-    // All locks dropped here
 
     let show = MenuItemBuilder::with_id("show", "Show Raz").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
@@ -156,6 +137,7 @@ pub fn run() {
             let manager = handle.try_state::<ServerManager>().unwrap();
             let monitor_state = handle.try_state::<MonitorState>().unwrap();
             servers::auto_launch_servers(&config_state, &manager, &handle);
+            servers::start_server_watcher(&handle);
             sidebar::start_monitor_loop(&config_state, &monitor_state, &handle);
 
             // Build tray menu with server statuses

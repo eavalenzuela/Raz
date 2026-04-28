@@ -1,4 +1,4 @@
-use crate::config::{save_config, ConfigState, PinnedItem, StatusMonitor};
+use crate::config::{save_snapshot, ConfigState, PinnedItem, StatusMonitor};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,28 +21,32 @@ pub fn pin_item(
     source_type: String,
     name: String,
 ) -> Result<PinnedItem, String> {
-    let mut config = state.0.lock().unwrap();
-    // Don't pin duplicates
-    if config.pinned.iter().any(|p| p.source_id == source_id && p.source_type == source_type) {
-        return Err("Item is already pinned".to_string());
-    }
-    let item = PinnedItem {
-        id: Uuid::new_v4().to_string(),
-        source_id,
-        source_type,
-        name,
+    let item = {
+        let mut config = state.0.lock().unwrap();
+        if config.pinned.iter().any(|p| p.source_id == source_id && p.source_type == source_type) {
+            return Err("Item is already pinned".to_string());
+        }
+        let item = PinnedItem {
+            id: Uuid::new_v4().to_string(),
+            source_id,
+            source_type,
+            name,
+        };
+        config.pinned.push(item.clone());
+        item
     };
-    config.pinned.push(item.clone());
-    save_config(&config)?;
+    save_snapshot(&state)?;
     let _ = app_handle.emit("pinned-changed", ());
     Ok(item)
 }
 
 #[tauri::command]
 pub fn unpin_item(state: State<ConfigState>, app_handle: AppHandle, id: String) -> Result<(), String> {
-    let mut config = state.0.lock().unwrap();
-    config.pinned.retain(|p| p.id != id);
-    save_config(&config)?;
+    {
+        let mut config = state.0.lock().unwrap();
+        config.pinned.retain(|p| p.id != id);
+    }
+    save_snapshot(&state)?;
     let _ = app_handle.emit("pinned-changed", ());
     Ok(())
 }
@@ -89,10 +93,12 @@ pub fn add_status_monitor(
     check_type: String,
     check_interval_secs: u64,
 ) -> Result<StatusMonitor, String> {
-    let mut config = state.0.lock().unwrap();
     let monitor = StatusMonitor::new(name, target, check_type, check_interval_secs);
-    config.status_monitors.push(monitor.clone());
-    save_config(&config)?;
+    {
+        let mut config = state.0.lock().unwrap();
+        config.status_monitors.push(monitor.clone());
+    }
+    save_snapshot(&state)?;
     Ok(monitor)
 }
 
@@ -105,22 +111,26 @@ pub fn update_status_monitor(
     check_type: String,
     check_interval_secs: u64,
 ) -> Result<StatusMonitor, String> {
-    let mut config = state.0.lock().unwrap();
-    let monitor = config.status_monitors.iter_mut().find(|m| m.id == id).ok_or("Monitor not found")?;
-    monitor.name = name;
-    monitor.target = target;
-    monitor.check_type = check_type;
-    monitor.check_interval_secs = check_interval_secs;
-    let updated = monitor.clone();
-    save_config(&config)?;
+    let updated = {
+        let mut config = state.0.lock().unwrap();
+        let monitor = config.status_monitors.iter_mut().find(|m| m.id == id).ok_or("Monitor not found")?;
+        monitor.name = name;
+        monitor.target = target;
+        monitor.check_type = check_type;
+        monitor.check_interval_secs = check_interval_secs;
+        monitor.clone()
+    };
+    save_snapshot(&state)?;
     Ok(updated)
 }
 
 #[tauri::command]
 pub fn remove_status_monitor(state: State<ConfigState>, id: String) -> Result<(), String> {
-    let mut config = state.0.lock().unwrap();
-    config.status_monitors.retain(|m| m.id != id);
-    save_config(&config)
+    {
+        let mut config = state.0.lock().unwrap();
+        config.status_monitors.retain(|m| m.id != id);
+    }
+    save_snapshot(&state)
 }
 
 #[tauri::command]
@@ -141,7 +151,6 @@ fn check_target(target: &str, check_type: &str) -> bool {
         "http" => {
             let client = reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(10))
-                .danger_accept_invalid_certs(true)
                 .build();
             match client {
                 Ok(c) => c.get(target).send().is_ok(),
@@ -172,29 +181,72 @@ pub fn start_monitor_loop(
     let stop_flag = monitor_state.stop_flag.clone();
     let handle = app_handle.clone();
 
+    // Debounce: only fire a notification after this many consecutive checks
+    // in the new state. Prevents flapping links from spamming notifications.
+    const DEBOUNCE_CHECKS: u32 = 2;
+
     std::thread::spawn(move || {
-        let mut prev_states: HashMap<String, String> = HashMap::new();
+        struct Tracker {
+            announced_state: String,
+            pending_state: String,
+            pending_count: u32,
+            next_check: Instant,
+        }
+        let mut trackers: HashMap<String, Tracker> = HashMap::new();
 
         loop {
             if *stop_flag.lock().unwrap() {
                 break;
             }
 
-            // Re-read monitors from live config state each cycle
             let monitors = {
                 let config_state = handle.try_state::<ConfigState>().unwrap();
                 let config = config_state.0.lock().unwrap();
                 config.status_monitors.clone()
             };
 
-            for monitor in &monitors {
-                let is_up = check_target(&monitor.target, &monitor.check_type);
-                let new_state = if is_up { "up" } else { "down" };
+            let now = Instant::now();
+            let monitor_ids: std::collections::HashSet<String> =
+                monitors.iter().map(|m| m.id.clone()).collect();
+            trackers.retain(|id, _| monitor_ids.contains(id));
 
-                // Check for state change and notify (respecting settings)
-                let prev = prev_states.get(&monitor.id);
-                if let Some(prev) = prev {
-                    if prev != new_state {
+            for monitor in &monitors {
+                let due = trackers
+                    .get(&monitor.id)
+                    .map(|t| now >= t.next_check)
+                    .unwrap_or(true);
+                if !due {
+                    continue;
+                }
+
+                let is_up = check_target(&monitor.target, &monitor.check_type);
+                let new_state = if is_up { "up" } else { "down" }.to_string();
+
+                let interval = Duration::from_secs(monitor.check_interval_secs.max(5));
+                let entry = trackers.entry(monitor.id.clone()).or_insert_with(|| Tracker {
+                    announced_state: "unknown".to_string(),
+                    pending_state: new_state.clone(),
+                    pending_count: 0,
+                    next_check: now,
+                });
+
+                if entry.pending_state == new_state {
+                    entry.pending_count = entry.pending_count.saturating_add(1);
+                } else {
+                    entry.pending_state = new_state.clone();
+                    entry.pending_count = 1;
+                }
+                entry.next_check = now + interval;
+
+                // First observation announces immediately (no flap to debounce).
+                // Subsequent transitions require DEBOUNCE_CHECKS confirmations.
+                let is_first = entry.announced_state == "unknown";
+                let should_announce = entry.announced_state != new_state
+                    && (is_first || entry.pending_count >= DEBOUNCE_CHECKS);
+                if should_announce {
+                    let prev_known = entry.announced_state != "unknown";
+                    entry.announced_state = new_state.clone();
+                    if prev_known {
                         let cs = handle.try_state::<ConfigState>().unwrap();
                         let settings = cs.0.lock().unwrap().settings.clone();
                         let should_notify = settings.notifications_enabled
@@ -210,14 +262,13 @@ pub fn start_monitor_loop(
                         }
                     }
                 }
-                prev_states.insert(monitor.id.clone(), new_state.to_string());
 
                 {
                     let mut map = statuses.lock().unwrap();
                     map.insert(
                         monitor.id.clone(),
                         MonitorStatusEntry {
-                            state: new_state.to_string(),
+                            state: entry.announced_state.clone(),
                             last_check: Instant::now(),
                         },
                     );
@@ -226,12 +277,12 @@ pub fn start_monitor_loop(
                 let _ = handle.emit("monitor-update", ());
             }
 
-            // Sleep, checking stop flag periodically
-            for _ in 0..30 {
+            // Tight outer loop — per-monitor due-time gating handles cadence.
+            for _ in 0..5 {
                 if *stop_flag.lock().unwrap() {
                     return;
                 }
-                std::thread::sleep(Duration::from_secs(2));
+                std::thread::sleep(Duration::from_secs(1));
             }
         }
     });

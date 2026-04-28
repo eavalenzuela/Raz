@@ -180,7 +180,17 @@ pub fn load_config() -> RazConfig {
 pub fn save_config(config: &RazConfig) -> Result<(), String> {
     let path = config_path();
     let data = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    fs::write(&path, data).map_err(|e| e.to_string())
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+/// Snapshot the config under the lock, drop the guard, then save. Use this
+/// from command handlers so a slow disk write doesn't block other commands
+/// and a panic during serialization doesn't poison the mutex.
+pub fn save_snapshot(state: &ConfigState) -> Result<(), String> {
+    let snapshot = { state.0.lock().unwrap().clone() };
+    save_config(&snapshot)
 }
 
 impl AppEntry {
@@ -248,5 +258,73 @@ impl LinkEntry {
             icon,
             folder,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_round_trip_preserves_data() {
+        let mut cfg = RazConfig::default();
+        cfg.apps.push(AppEntry::new(
+            "Foo".to_string(),
+            Some("foo --bar".to_string()),
+            None,
+            vec![],
+            Some("/tmp".to_string()),
+            vec![EnvVar { key: "K".into(), value: "V".into() }],
+            None,
+            Some("Editor".to_string()),
+        ));
+        cfg.links.push(LinkEntry::new(
+            "Site".to_string(),
+            "https://example.com".to_string(),
+            None,
+            Some("Home".to_string()),
+        ));
+        cfg.servers.push(ServerEntry::new(
+            "Dev".to_string(),
+            None,
+            Some("/usr/bin/server".to_string()),
+            vec!["--port".into(), "8080".into()],
+            None,
+            vec![],
+            true, true, 5, 10,
+        ));
+        cfg.status_monitors.push(StatusMonitor::new(
+            "API".to_string(),
+            "https://api.example.com".to_string(),
+            "http".to_string(),
+            30,
+        ));
+        cfg.settings.notifications_enabled = false;
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: RazConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.apps.len(), 1);
+        assert_eq!(parsed.apps[0].name, "Foo");
+        assert_eq!(parsed.apps[0].env_vars[0].key, "K");
+        assert_eq!(parsed.links.len(), 1);
+        assert_eq!(parsed.links[0].folder.as_deref(), Some("Home"));
+        assert_eq!(parsed.servers.len(), 1);
+        assert!(parsed.servers[0].auto_restart);
+        assert_eq!(parsed.servers[0].max_retries, 5);
+        assert_eq!(parsed.status_monitors.len(), 1);
+        assert_eq!(parsed.status_monitors[0].check_interval_secs, 30);
+        assert!(!parsed.settings.notifications_enabled);
+        assert!(parsed.settings.minimize_to_tray); // default still applies
+    }
+
+    #[test]
+    fn missing_optional_fields_use_defaults() {
+        let json = r#"{"apps":[],"servers":[{"id":"x","name":"S"}]}"#;
+        let parsed: RazConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.servers[0].max_retries, 3);
+        assert_eq!(parsed.servers[0].restart_cooldown_secs, 5);
+        assert!(!parsed.servers[0].auto_restart);
+        assert!(parsed.settings.notifications_enabled);
     }
 }

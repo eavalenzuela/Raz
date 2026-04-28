@@ -55,10 +55,10 @@
     await pollStatuses();
     pollInterval = setInterval(pollStatuses, 3000);
 
-    unlisten = await listen("server-output", (event) => {
-      const [id, line] = event.payload;
-      if (id === selectedServerId) {
-        outputLines = [...outputLines, line];
+    unlisten = await listen("server-output-batch", (event) => {
+      const [id, lines] = event.payload;
+      if (id === selectedServerId && lines.length) {
+        outputLines = [...outputLines, ...lines];
         requestAnimationFrame(() => {
           if (outputEl) outputEl.scrollTop = outputEl.scrollHeight;
         });

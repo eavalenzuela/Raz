@@ -1,4 +1,4 @@
-use crate::config::{save_config, AppEntry, ConfigState, EnvVar, LinkEntry, Settings};
+use crate::config::{save_snapshot, AppEntry, ConfigState, EnvVar, LinkEntry, Settings};
 use std::collections::HashMap;
 use std::process::Command;
 use tauri::State;
@@ -26,10 +26,12 @@ pub fn add_app(
     icon: Option<String>,
     type_label: Option<String>,
 ) -> Result<AppEntry, String> {
-    let mut config = state.0.lock().unwrap();
     let entry = AppEntry::new(name, raw_command, executable, arguments, working_directory, env_vars, icon, type_label);
-    config.apps.push(entry.clone());
-    save_config(&config)?;
+    {
+        let mut config = state.0.lock().unwrap();
+        config.apps.push(entry.clone());
+    }
+    save_snapshot(&state)?;
     Ok(entry)
 }
 
@@ -46,45 +48,61 @@ pub fn update_app(
     icon: Option<String>,
     type_label: Option<String>,
 ) -> Result<AppEntry, String> {
-    let mut config = state.0.lock().unwrap();
-    let app = config.apps.iter_mut().find(|a| a.id == id).ok_or("App not found")?;
-    app.name = name;
-    app.raw_command = raw_command;
-    app.executable = executable;
-    app.arguments = arguments;
-    app.working_directory = working_directory;
-    app.env_vars = env_vars;
-    app.icon = icon;
-    app.type_label = type_label;
-    let updated = app.clone();
-    save_config(&config)?;
+    let updated = {
+        let mut config = state.0.lock().unwrap();
+        let app = config.apps.iter_mut().find(|a| a.id == id).ok_or("App not found")?;
+        app.name = name;
+        app.raw_command = raw_command;
+        app.executable = executable;
+        app.arguments = arguments;
+        app.working_directory = working_directory;
+        app.env_vars = env_vars;
+        app.icon = icon;
+        app.type_label = type_label;
+        app.clone()
+    };
+    save_snapshot(&state)?;
     Ok(updated)
 }
 
 #[tauri::command]
 pub fn remove_app(state: State<ConfigState>, id: String) -> Result<(), String> {
-    let mut config = state.0.lock().unwrap();
-    config.apps.retain(|a| a.id != id);
-    save_config(&config)
+    {
+        let mut config = state.0.lock().unwrap();
+        config.apps.retain(|a| a.id != id);
+    }
+    save_snapshot(&state)
 }
 
 #[tauri::command]
 pub fn reorder_apps(state: State<ConfigState>, ids: Vec<String>) -> Result<(), String> {
-    let mut config = state.0.lock().unwrap();
-    let mut reordered = Vec::with_capacity(ids.len());
-    for id in &ids {
-        if let Some(app) = config.apps.iter().find(|a| &a.id == id) {
-            reordered.push(app.clone());
+    {
+        let mut config = state.0.lock().unwrap();
+        let id_set: std::collections::HashSet<&String> = ids.iter().collect();
+        let mut reordered = Vec::with_capacity(config.apps.len());
+        for id in &ids {
+            if let Some(app) = config.apps.iter().find(|a| &a.id == id) {
+                reordered.push(app.clone());
+            }
         }
+        // Preserve any entries the caller didn't include (defensive against
+        // a stale id list from the frontend racing with an add).
+        for app in &config.apps {
+            if !id_set.contains(&app.id) {
+                reordered.push(app.clone());
+            }
+        }
+        config.apps = reordered;
     }
-    config.apps = reordered;
-    save_config(&config)
+    save_snapshot(&state)
 }
 
 #[tauri::command]
 pub fn launch_app(state: State<ConfigState>, id: String) -> Result<(), String> {
-    let mut config = state.0.lock().unwrap();
-    let app = config.apps.iter().find(|a| a.id == id).ok_or("App not found")?;
+    let app = {
+        let config = state.0.lock().unwrap();
+        config.apps.iter().find(|a| a.id == id).ok_or("App not found")?.clone()
+    };
 
     if let Some(ref raw) = app.raw_command {
         let mut cmd = Command::new("bash");
@@ -107,16 +125,18 @@ pub fn launch_app(state: State<ConfigState>, id: String) -> Result<(), String> {
         return Err("No command or executable configured".to_string());
     }
 
-    // Track launch stats
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if let Some(app) = config.apps.iter_mut().find(|a| a.id == id) {
-        app.launch_count += 1;
-        app.last_launched = Some(now);
+    {
+        let mut config = state.0.lock().unwrap();
+        if let Some(app) = config.apps.iter_mut().find(|a| a.id == id) {
+            app.launch_count += 1;
+            app.last_launched = Some(now);
+        }
     }
-    let _ = save_config(&config);
+    let _ = save_snapshot(&state);
 
     Ok(())
 }
@@ -141,60 +161,107 @@ pub fn open_app_directory(state: State<ConfigState>, id: String) -> Result<(), S
     Ok(())
 }
 
+/// Walk known icon directories once and build a `stem -> (priority, path)` map.
+/// Priority orders results so larger / preferred sizes win for the same name.
+fn build_icon_index() -> HashMap<String, (u32, String)> {
+    let mut index: HashMap<String, (u32, String)> = HashMap::new();
+
+    // Lower number = higher priority.
+    let size_priority = |size: &str| -> u32 {
+        match size {
+            "scalable" => 5,
+            "256x256" => 10,
+            "128x128" => 20,
+            "96x96" => 30,
+            "64x64" => 40,
+            "48x48" => 50,
+            "32x32" => 60,
+            "24x24" => 70,
+            "16x16" => 80,
+            _ => 100,
+        }
+    };
+    let ext_priority = |ext: &str| -> u32 {
+        match ext {
+            "svg" => 0,
+            "png" => 1,
+            "xpm" => 2,
+            "ico" => 3,
+            _ => 9,
+        }
+    };
+
+    let consider = |stem: &str, ext: &str, size: &str, full: String, index: &mut HashMap<String, (u32, String)>| {
+        let prio = size_priority(size) * 10 + ext_priority(ext);
+        match index.get(stem) {
+            Some((existing_prio, _)) if *existing_prio <= prio => {}
+            _ => { index.insert(stem.to_string(), (prio, full)); }
+        }
+    };
+
+    let mut roots: Vec<std::path::PathBuf> = vec![
+        std::path::PathBuf::from("/usr/share/icons"),
+        std::path::PathBuf::from("/usr/share/pixmaps"),
+        std::path::PathBuf::from("/usr/local/share/icons"),
+    ];
+    if let Some(d) = dirs::data_dir() {
+        roots.push(d.join("icons"));
+    }
+
+    for root in &roots {
+        let Ok(top) = std::fs::read_dir(root) else { continue };
+        // For pixmaps-style flat dirs, files live directly under root.
+        // For theme dirs, structure is theme/size/category/file.
+        for entry in top.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let (Some(stem), Some(ext)) = (path.file_stem().and_then(|s| s.to_str()), path.file_name().and_then(|n| n.to_str()).and_then(|n| n.rsplit('.').next())) {
+                    consider(stem, ext, "scalable", path.to_string_lossy().to_string(), &mut index);
+                }
+                continue;
+            }
+            // Theme dir — descend size/category.
+            let Ok(sizes) = std::fs::read_dir(&path) else { continue };
+            for size_entry in sizes.flatten() {
+                let size_path = size_entry.path();
+                let size = size_path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                let Ok(cats) = std::fs::read_dir(&size_path) else { continue };
+                for cat_entry in cats.flatten() {
+                    let cat_path = cat_entry.path();
+                    let Ok(files) = std::fs::read_dir(&cat_path) else { continue };
+                    for file_entry in files.flatten() {
+                        let file_path = file_entry.path();
+                        if !file_path.is_file() { continue; }
+                        let stem = match file_path.file_stem().and_then(|s| s.to_str()) {
+                            Some(s) => s.to_string(),
+                            None => continue,
+                        };
+                        let ext = match file_path.extension().and_then(|s| s.to_str()) {
+                            Some(s) => s.to_string(),
+                            None => continue,
+                        };
+                        if !matches!(ext.as_str(), "png" | "svg" | "xpm" | "ico") { continue; }
+                        consider(&stem, &ext, &size, file_path.to_string_lossy().to_string(), &mut index);
+                    }
+                }
+            }
+        }
+    }
+
+    index
+}
+
 #[tauri::command]
 pub fn resolve_icon(icon: String) -> Option<String> {
-    // If it's already an absolute path and exists, return it
     let path = std::path::PathBuf::from(&icon);
     if path.is_absolute() && path.exists() {
         return Some(icon);
     }
 
-    // Try common icon directories for theme icon names
-    let icon_dirs = [
-        "/usr/share/icons/hicolor",
-        "/usr/share/pixmaps",
-        "/usr/share/icons",
-    ];
-    let sizes = ["256x256", "128x128", "96x96", "64x64", "48x48", "32x32", "24x24", "16x16", "scalable"];
-    let categories = ["apps", "devices", "mimetypes", "places", "status"];
-    let extensions = ["png", "svg", "xpm"];
-
-    for dir in &icon_dirs {
-        for size in &sizes {
-            for cat in &categories {
-                for ext in &extensions {
-                    let candidate = format!("{}/{}/{}/{}.{}", dir, size, cat, icon, ext);
-                    if std::path::Path::new(&candidate).exists() {
-                        return Some(candidate);
-                    }
-                }
-            }
-        }
-        // Also check flat structure (e.g. /usr/share/pixmaps/icon.png)
-        for ext in &extensions {
-            let candidate = format!("{}/{}.{}", dir, icon, ext);
-            if std::path::Path::new(&candidate).exists() {
-                return Some(candidate);
-            }
-        }
-    }
-
-    // Check ~/.local/share/icons as well
-    if let Some(data_dir) = dirs::data_dir() {
-        let local_icons = data_dir.join("icons");
-        for size in &sizes {
-            for cat in &categories {
-                for ext in &extensions {
-                    let candidate = local_icons.join("hicolor").join(size).join(cat).join(format!("{}.{}", icon, ext));
-                    if candidate.exists() {
-                        return Some(candidate.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    None
+    use std::sync::OnceLock;
+    static INDEX: OnceLock<HashMap<String, (u32, String)>> = OnceLock::new();
+    let index = INDEX.get_or_init(build_icon_index);
+    index.get(&icon).map(|(_, p)| p.clone())
 }
 
 #[tauri::command]
@@ -221,37 +288,9 @@ pub fn read_icon_base64(path: String) -> Result<String, String> {
         }
     };
 
-    let mut b64 = String::new();
-    b64.push_str("data:");
-    b64.push_str(mime);
-    b64.push_str(";base64,");
-    let engine = base64_encode(&data);
-    b64.push_str(&engine);
-    Ok(b64)
-}
-
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok(format!("data:{};base64,{}", mime, encoded))
 }
 
 #[derive(serde::Serialize)]
@@ -342,9 +381,8 @@ pub fn add_app_from_desktop(
     let info = parse_desktop_file(&content)?;
 
     // Resolve icon theme name to a file path
-    let resolved_icon = info.icon.and_then(|i| resolve_icon(i));
+    let resolved_icon = info.icon.and_then(resolve_icon);
 
-    let mut config = state.0.lock().unwrap();
     let entry = AppEntry::new(
         info.name,
         Some(info.exec),
@@ -355,8 +393,11 @@ pub fn add_app_from_desktop(
         resolved_icon,
         None,
     );
-    config.apps.push(entry.clone());
-    save_config(&config)?;
+    {
+        let mut config = state.0.lock().unwrap();
+        config.apps.push(entry.clone());
+    }
+    save_snapshot(&state)?;
     Ok(entry)
 }
 
@@ -427,14 +468,13 @@ pub fn bulk_import_desktop(
     state: State<ConfigState>,
     paths: Vec<String>,
 ) -> Result<Vec<AppEntry>, String> {
-    let mut config = state.0.lock().unwrap();
     let mut imported = Vec::new();
 
     for path in paths {
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read {}: {}", path, e))?;
         let info = parse_desktop_file(&content)?;
-        let resolved_icon = info.icon.and_then(|i| resolve_icon(i));
+        let resolved_icon = info.icon.and_then(resolve_icon);
         let entry = AppEntry::new(
             info.name,
             Some(info.exec),
@@ -445,11 +485,14 @@ pub fn bulk_import_desktop(
             resolved_icon,
             None,
         );
-        config.apps.push(entry.clone());
+        {
+            let mut config = state.0.lock().unwrap();
+            config.apps.push(entry.clone());
+        }
         imported.push(entry);
     }
 
-    save_config(&config)?;
+    save_snapshot(&state)?;
     Ok(imported)
 }
 
@@ -469,10 +512,12 @@ pub fn add_link(
     icon: Option<String>,
     folder: Option<String>,
 ) -> Result<LinkEntry, String> {
-    let mut config = state.0.lock().unwrap();
     let entry = LinkEntry::new(name, url, icon, folder);
-    config.links.push(entry.clone());
-    save_config(&config)?;
+    {
+        let mut config = state.0.lock().unwrap();
+        config.links.push(entry.clone());
+    }
+    save_snapshot(&state)?;
     Ok(entry)
 }
 
@@ -485,14 +530,16 @@ pub fn update_link(
     icon: Option<String>,
     folder: Option<String>,
 ) -> Result<LinkEntry, String> {
-    let mut config = state.0.lock().unwrap();
-    let link = config.links.iter_mut().find(|l| l.id == id).ok_or("Link not found")?;
-    link.name = name;
-    link.url = url;
-    link.icon = icon;
-    link.folder = folder;
-    let updated = link.clone();
-    save_config(&config)?;
+    let updated = {
+        let mut config = state.0.lock().unwrap();
+        let link = config.links.iter_mut().find(|l| l.id == id).ok_or("Link not found")?;
+        link.name = name;
+        link.url = url;
+        link.icon = icon;
+        link.folder = folder;
+        link.clone()
+    };
+    save_snapshot(&state)?;
     Ok(updated)
 }
 
@@ -538,7 +585,6 @@ pub fn fetch_favicon(url: String) -> Result<String, String> {
 pub fn fetch_url_metadata(url: String) -> Result<String, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
-        .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .map_err(|e| e.to_string())?;
@@ -566,22 +612,32 @@ pub fn fetch_url_metadata(url: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn remove_link(state: State<ConfigState>, id: String) -> Result<(), String> {
-    let mut config = state.0.lock().unwrap();
-    config.links.retain(|l| l.id != id);
-    save_config(&config)
+    {
+        let mut config = state.0.lock().unwrap();
+        config.links.retain(|l| l.id != id);
+    }
+    save_snapshot(&state)
 }
 
 #[tauri::command]
 pub fn reorder_links(state: State<ConfigState>, ids: Vec<String>) -> Result<(), String> {
-    let mut config = state.0.lock().unwrap();
-    let mut reordered = Vec::with_capacity(ids.len());
-    for id in &ids {
-        if let Some(link) = config.links.iter().find(|l| &l.id == id) {
-            reordered.push(link.clone());
+    {
+        let mut config = state.0.lock().unwrap();
+        let id_set: std::collections::HashSet<&String> = ids.iter().collect();
+        let mut reordered = Vec::with_capacity(config.links.len());
+        for id in &ids {
+            if let Some(link) = config.links.iter().find(|l| &l.id == id) {
+                reordered.push(link.clone());
+            }
         }
+        for link in &config.links {
+            if !id_set.contains(&link.id) {
+                reordered.push(link.clone());
+            }
+        }
+        config.links = reordered;
     }
-    config.links = reordered;
-    save_config(&config)
+    save_snapshot(&state)
 }
 
 #[tauri::command]
@@ -674,8 +730,54 @@ pub fn update_settings(
     state: State<ConfigState>,
     settings: Settings,
 ) -> Result<Settings, String> {
-    let mut config = state.0.lock().unwrap();
-    config.settings = settings;
-    save_config(&config)?;
-    Ok(config.settings.clone())
+    let result = {
+        let mut config = state.0.lock().unwrap();
+        config.settings = settings;
+        config.settings.clone()
+    };
+    save_snapshot(&state)?;
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_basic_desktop_entry() {
+        let raw = "[Desktop Entry]\nType=Application\nName=Foo\nExec=/usr/bin/foo --bar\nIcon=foo\n";
+        let info = parse_desktop_file(raw).unwrap();
+        assert_eq!(info.name, "Foo");
+        assert_eq!(info.exec, "/usr/bin/foo --bar");
+        assert_eq!(info.icon.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn strips_field_codes() {
+        let raw = "[Desktop Entry]\nName=Foo\nExec=/usr/bin/foo %F %u %i\n";
+        let info = parse_desktop_file(raw).unwrap();
+        assert_eq!(info.exec, "/usr/bin/foo");
+    }
+
+    #[test]
+    fn unescapes_desktop_escapes() {
+        let raw = "[Desktop Entry]\nName=Foo\nExec=/usr/bin/foo\\sbar\\\\baz\n";
+        let info = parse_desktop_file(raw).unwrap();
+        // \s -> space, \\ -> backslash
+        assert_eq!(info.exec, "/usr/bin/foo bar\\baz");
+    }
+
+    #[test]
+    fn ignores_other_groups() {
+        let raw = "[Desktop Entry]\nName=Foo\nExec=foo\n[Desktop Action open]\nName=Should Not Win\nExec=other\n";
+        let info = parse_desktop_file(raw).unwrap();
+        assert_eq!(info.name, "Foo");
+        assert_eq!(info.exec, "foo");
+    }
+
+    #[test]
+    fn errors_on_missing_required_fields() {
+        let raw = "[Desktop Entry]\nName=Foo\n";
+        assert!(parse_desktop_file(raw).is_err());
+    }
 }

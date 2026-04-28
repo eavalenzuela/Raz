@@ -1,9 +1,9 @@
-use crate::config::{save_config, ConfigState, EnvVar, ServerEntry};
+use crate::config::{save_snapshot, ConfigState, EnvVar, ServerEntry};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -36,10 +36,50 @@ impl ServerManager {
 }
 
 const MAX_OUTPUT_LINES: usize = 5000;
+/// Hard cap on a single output line — a server that emits a megabyte of JSON
+/// in one line shouldn't be able to balloon our memory.
+const MAX_LINE_BYTES: usize = 8 * 1024;
+/// Coalesce stdout/stderr emits to the UI to at most this often per server.
+const EMIT_INTERVAL_MS: u64 = 100;
 
 fn timestamp() -> String {
     let now = chrono::Local::now();
     now.format("%H:%M:%S").to_string()
+}
+
+fn truncate_line(mut line: String) -> String {
+    if line.len() > MAX_LINE_BYTES {
+        // Walk back to a UTF-8 char boundary so we don't slice mid-codepoint.
+        let mut cut = MAX_LINE_BYTES;
+        while cut > 0 && !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        line.truncate(cut);
+        line.push_str(" …[truncated]");
+    }
+    line
+}
+
+/// Spawns a background thread that batches emits for one (server_id, stream).
+/// Returns a closure-friendly sender: push lines into the Vec, the thread
+/// drains and emits at most every EMIT_INTERVAL_MS.
+fn start_emit_batcher(handle: AppHandle, server_id: String) -> Arc<Mutex<Vec<String>>> {
+    let pending: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let pending_clone = Arc::clone(&pending);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(EMIT_INTERVAL_MS));
+            let batch: Vec<String> = {
+                let mut q = pending_clone.lock().unwrap();
+                if q.is_empty() {
+                    continue;
+                }
+                std::mem::take(&mut *q)
+            };
+            let _ = handle.emit("server-output-batch", (&server_id, &batch));
+        }
+    });
+    pending
 }
 
 fn spawn_server(
@@ -71,53 +111,36 @@ fn spawn_server(
 
     let output = Arc::new(Mutex::new(Vec::<String>::new()));
     let server_id = entry.id.clone();
+    let pending = start_emit_batcher(app_handle.clone(), server_id.clone());
 
-    // Read stdout
+    let consume = |reader: Box<dyn BufRead + Send>, prefix_stderr: bool, output: Arc<Mutex<Vec<String>>>, pending: Arc<Mutex<Vec<String>>>| {
+        std::thread::spawn(move || {
+            for line in reader.lines() {
+                let Ok(line) = line else { continue };
+                let stamped = if prefix_stderr {
+                    format!("[{}] [stderr] {}", timestamp(), line)
+                } else {
+                    format!("[{}] {}", timestamp(), line)
+                };
+                let stamped = truncate_line(stamped);
+                {
+                    let mut buf = output.lock().unwrap();
+                    buf.push(stamped.clone());
+                    if buf.len() > MAX_OUTPUT_LINES {
+                        let excess = buf.len() - MAX_OUTPUT_LINES;
+                        buf.drain(0..excess);
+                    }
+                }
+                pending.lock().unwrap().push(stamped);
+            }
+        });
+    };
+
     if let Some(stdout) = child.stdout.take() {
-        let output_clone = Arc::clone(&output);
-        let handle = app_handle.clone();
-        let id = server_id.clone();
-        std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    let stamped = format!("[{}] {}", timestamp(), line);
-                    {
-                        let mut buf = output_clone.lock().unwrap();
-                        buf.push(stamped.clone());
-                        if buf.len() > MAX_OUTPUT_LINES {
-                            let excess = buf.len() - MAX_OUTPUT_LINES;
-                            buf.drain(0..excess);
-                        }
-                    }
-                    let _ = handle.emit("server-output", (&id, &stamped));
-                }
-            }
-        });
+        consume(Box::new(BufReader::new(stdout)), false, Arc::clone(&output), Arc::clone(&pending));
     }
-
-    // Read stderr
     if let Some(stderr) = child.stderr.take() {
-        let output_clone = Arc::clone(&output);
-        let handle = app_handle.clone();
-        let id = server_id.clone();
-        std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    let stamped = format!("[{}] [stderr] {}", timestamp(), line);
-                    {
-                        let mut buf = output_clone.lock().unwrap();
-                        buf.push(stamped.clone());
-                        if buf.len() > MAX_OUTPUT_LINES {
-                            let excess = buf.len() - MAX_OUTPUT_LINES;
-                            buf.drain(0..excess);
-                        }
-                    }
-                    let _ = handle.emit("server-output", (&id, &stamped));
-                }
-            }
-        });
+        consume(Box::new(BufReader::new(stderr)), true, Arc::clone(&output), Arc::clone(&pending));
     }
 
     Ok(RunningServer {
@@ -151,16 +174,15 @@ pub fn add_server(
     max_retries: u32,
     restart_cooldown_secs: u64,
 ) -> Result<ServerEntry, String> {
-    let entry = {
+    let entry = ServerEntry::new(
+        name, raw_command, executable, arguments, working_directory,
+        env_vars, auto_launch, auto_restart, max_retries, restart_cooldown_secs,
+    );
+    {
         let mut config = state.0.lock().unwrap();
-        let entry = ServerEntry::new(
-            name, raw_command, executable, arguments, working_directory,
-            env_vars, auto_launch, auto_restart, max_retries, restart_cooldown_secs,
-        );
         config.servers.push(entry.clone());
-        save_config(&config)?;
-        entry
-    };
+    }
+    save_snapshot(&state)?;
     let _ = app_handle.emit("tray-update", ());
     Ok(entry)
 }
@@ -194,10 +216,9 @@ pub fn update_server(
         server.auto_restart = auto_restart;
         server.max_retries = max_retries;
         server.restart_cooldown_secs = restart_cooldown_secs;
-        let updated = server.clone();
-        save_config(&config)?;
-        updated
+        server.clone()
     };
+    save_snapshot(&state)?;
     let _ = app_handle.emit("tray-update", ());
     Ok(updated)
 }
@@ -218,8 +239,8 @@ pub fn remove_server(
     {
         let mut config = state.0.lock().unwrap();
         config.servers.retain(|s| s.id != id);
-        save_config(&config)?;
     }
+    save_snapshot(&state)?;
     let _ = app_handle.emit("tray-update", ());
     Ok(())
 }
@@ -315,97 +336,100 @@ pub fn get_server_resources(manager: State<ServerManager>, id: String) -> Result
     })
 }
 
-fn read_cpu_percent(pid: u32) -> Option<f64> {
+fn read_proc_jiffies(pid: u32) -> Option<u64> {
+    // Reads utime+stime from /proc/{pid}/stat. The 2nd field is `(comm)` and
+    // can contain spaces or parentheses, so split off everything up to the
+    // last ')' before parsing the rest.
     let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
-    let fields: Vec<&str> = stat.split_whitespace().collect();
-    if fields.len() < 22 {
-        return None;
-    }
-    let utime: u64 = fields[13].parse().ok()?;
-    let stime: u64 = fields[14].parse().ok()?;
-    let starttime: u64 = fields[21].parse().ok()?;
+    let rparen = stat.rfind(')')?;
+    let after = &stat[rparen + 1..];
+    let fields: Vec<&str> = after.split_whitespace().collect();
+    // After ')': field index 0 = state (3rd field overall), so utime is index 11, stime is index 12.
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    Some(utime + stime)
+}
 
-    let uptime_str = std::fs::read_to_string("/proc/uptime").ok()?;
-    let system_uptime: f64 = uptime_str.split_whitespace().next()?.parse().ok()?;
+fn read_cpu_percent(pid: u32) -> Option<f64> {
+    let clk_tck: f64 = 100.0;
+    let sample_window = Duration::from_millis(100);
 
-    let clk_tck: f64 = 100.0; // sysconf(_SC_CLK_TCK), almost always 100 on Linux
-    let total_time = (utime + stime) as f64 / clk_tck;
-    let elapsed = system_uptime - (starttime as f64 / clk_tck);
+    let t0 = read_proc_jiffies(pid)?;
+    std::thread::sleep(sample_window);
+    let t1 = read_proc_jiffies(pid)?;
 
+    let delta = t1.saturating_sub(t0) as f64 / clk_tck;
+    let elapsed = sample_window.as_secs_f64();
     if elapsed > 0.0 {
-        Some((total_time / elapsed) * 100.0)
+        Some((delta / elapsed) * 100.0)
     } else {
         Some(0.0)
     }
 }
 
 #[tauri::command]
-pub fn get_all_server_statuses(
-    manager: State<ServerManager>,
-    app_handle: AppHandle,
-) -> Vec<ServerStatus> {
-    let mut running = manager.0.lock().unwrap();
-    let mut statuses = Vec::new();
+pub fn get_all_server_statuses(manager: State<ServerManager>) -> Vec<ServerStatus> {
+    let running = manager.0.lock().unwrap();
+    running
+        .keys()
+        .map(|id| ServerStatus {
+            id: id.clone(),
+            state: "running".to_string(),
+        })
+        .collect()
+}
 
-    let mut crashed = Vec::new();
-    for (id, server) in running.iter_mut() {
-        match server.child.try_wait() {
-            Ok(Some(_exit)) => {
-                crashed.push(id.clone());
-                statuses.push(ServerStatus {
-                    id: id.clone(),
-                    state: "crashed".to_string(),
-                });
-            }
-            Ok(None) => {
-                statuses.push(ServerStatus {
-                    id: id.clone(),
-                    state: "running".to_string(),
-                });
-            }
-            Err(_) => {
-                crashed.push(id.clone());
-                statuses.push(ServerStatus {
-                    id: id.clone(),
-                    state: "crashed".to_string(),
-                });
-            }
-        }
-    }
+/// Background watcher: reaps crashed servers and triggers auto-restart.
+/// Runs once at startup; decouples restart timing from frontend polling.
+pub fn start_server_watcher(app_handle: &AppHandle) {
+    let handle = app_handle.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
 
-    // Handle crashed servers — auto-restart if configured
-    for id in crashed {
-        let removed = running.remove(&id);
-        if let Some(old_server) = removed {
-            let config = {
-                let cs = app_handle.try_state::<ConfigState>().unwrap();
-                let cfg = cs.0.lock().unwrap().clone();
-                cfg
-            };
-            if let Some(entry) = config.servers.iter().find(|s| s.id == id) {
-                if entry.auto_restart && old_server.restart_count < entry.max_retries {
-                    let cooldown = std::time::Duration::from_secs(entry.restart_cooldown_secs);
-                    let entry = entry.clone();
-                    let id = id.clone();
-                    let handle = app_handle.clone();
-
-                    // Spawn restart in background after cooldown
-                    std::thread::spawn(move || {
-                        std::thread::sleep(cooldown);
-                        if let Ok(mut new_server) = spawn_server(&entry, &handle) {
-                            new_server.restart_count = old_server.restart_count + 1;
-                            let manager = handle.try_state::<ServerManager>().unwrap();
-                            let mut running = manager.0.lock().unwrap();
-                            running.insert(id, new_server);
-                            let _ = handle.emit("tray-update", ());
-                        }
-                    });
+        let crashed: Vec<(String, RunningServer)> = {
+            let manager = handle.try_state::<ServerManager>().unwrap();
+            let mut running = manager.0.lock().unwrap();
+            let mut to_remove = Vec::new();
+            for (id, server) in running.iter_mut() {
+                match server.child.try_wait() {
+                    Ok(Some(_)) | Err(_) => to_remove.push(id.clone()),
+                    Ok(None) => {}
                 }
             }
-        }
-    }
+            to_remove
+                .into_iter()
+                .filter_map(|id| running.remove(&id).map(|s| (id, s)))
+                .collect()
+        };
 
-    statuses
+        if crashed.is_empty() {
+            continue;
+        }
+
+        let _ = handle.emit("tray-update", ());
+
+        for (id, old_server) in crashed {
+            let cs = handle.try_state::<ConfigState>().unwrap();
+            let config = cs.0.lock().unwrap().clone();
+            let Some(entry) = config.servers.iter().find(|s| s.id == id).cloned() else { continue };
+            if !entry.auto_restart || old_server.restart_count >= entry.max_retries {
+                continue;
+            }
+            let cooldown = Duration::from_secs(entry.restart_cooldown_secs);
+            let handle_inner = handle.clone();
+            let id_inner = id.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(cooldown);
+                if let Ok(mut new_server) = spawn_server(&entry, &handle_inner) {
+                    new_server.restart_count = old_server.restart_count + 1;
+                    let manager = handle_inner.try_state::<ServerManager>().unwrap();
+                    let mut running = manager.0.lock().unwrap();
+                    running.insert(id_inner, new_server);
+                    let _ = handle_inner.emit("tray-update", ());
+                }
+            });
+        }
+    });
 }
 
 #[tauri::command]
