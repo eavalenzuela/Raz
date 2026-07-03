@@ -23,8 +23,11 @@
 
   function summary() {
     if (monitors.length === 0) return { text: "No monitors configured", state: "none" };
+    // Paused monitors don't count toward health.
+    const active = monitors.filter(m => m.enabled !== false);
+    if (active.length === 0) return { text: "All monitors paused", state: "none" };
     const down = statuses.filter(s => s.state === "down").length;
-    const total = monitors.length;
+    const total = active.length;
     const checked = statuses.length;
     if (checked === 0) return { text: "Checking...", state: "unknown" };
     if (down === 0) return { text: "All systems online", state: "online" };

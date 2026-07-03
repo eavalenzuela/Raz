@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
 pub fn quit_app(app_handle: AppHandle) {
+    crate::persist_window_geometry(&app_handle);
     // Don't orphan the processes we spawned.
     crate::servers::shutdown_all_servers(&app_handle);
     std::process::exit(0);
@@ -77,6 +78,29 @@ pub fn remove_app(state: State<ConfigState>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn duplicate_app(state: State<ConfigState>, id: String) -> Result<AppEntry, String> {
+    let entry = {
+        let mut config = state.0.lock().unwrap();
+        let idx = config.apps.iter().position(|a| a.id == id).ok_or("App not found")?;
+        let src = &config.apps[idx];
+        let copy = AppEntry::new(
+            format!("{} (copy)", src.name),
+            src.raw_command.clone(),
+            src.executable.clone(),
+            src.arguments.clone(),
+            src.working_directory.clone(),
+            src.env_vars.clone(),
+            src.icon.clone(),
+            src.type_label.clone(),
+        );
+        config.apps.insert(idx + 1, copy.clone());
+        copy
+    };
+    save_snapshot(&state)?;
+    Ok(entry)
+}
+
+#[tauri::command]
 pub fn reorder_apps(state: State<ConfigState>, ids: Vec<String>) -> Result<(), String> {
     {
         let mut config = state.0.lock().unwrap();
@@ -99,6 +123,29 @@ pub fn reorder_apps(state: State<ConfigState>, ids: Vec<String>) -> Result<(), S
     save_snapshot(&state)
 }
 
+/// Build the launch command for an app entry (raw shell command or
+/// executable + args), with working directory and env vars applied.
+fn build_launch_command(app: &AppEntry) -> Result<Command, String> {
+    let mut cmd = if let Some(ref raw) = app.raw_command {
+        let mut c = Command::new("bash");
+        c.arg("-c").arg(raw);
+        c
+    } else if let Some(ref executable) = app.executable {
+        let mut c = Command::new(executable);
+        c.args(&app.arguments);
+        c
+    } else {
+        return Err("No command or executable configured".to_string());
+    };
+    if let Some(ref dir) = app.working_directory {
+        cmd.current_dir(dir);
+    }
+    for env in &app.env_vars {
+        cmd.env(&env.key, &env.value);
+    }
+    Ok(cmd)
+}
+
 #[tauri::command]
 pub fn launch_app(state: State<ConfigState>, id: String) -> Result<(), String> {
     let app = {
@@ -106,29 +153,20 @@ pub fn launch_app(state: State<ConfigState>, id: String) -> Result<(), String> {
         config.apps.iter().find(|a| a.id == id).ok_or("App not found")?.clone()
     };
 
-    if let Some(ref raw) = app.raw_command {
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(raw);
-        if let Some(ref dir) = app.working_directory {
-            cmd.current_dir(dir);
-        }
-        for env in &app.env_vars {
-            cmd.env(&env.key, &env.value);
-        }
-        cmd.spawn().map_err(|e| format!("Failed to launch: {}", e))?;
-    } else if let Some(ref executable) = app.executable {
-        let mut cmd = Command::new(executable);
-        cmd.args(&app.arguments);
-        if let Some(ref dir) = app.working_directory {
-            cmd.current_dir(dir);
-        }
-        for env in &app.env_vars {
-            cmd.env(&env.key, &env.value);
-        }
-        cmd.spawn().map_err(|e| format!("Failed to launch: {}", e))?;
-    } else {
-        return Err("No command or executable configured".to_string());
+    let mut cmd = build_launch_command(&app)?;
+    // Detach into its own process group so the launched app isn't tied to
+    // Raz's terminal/session signals.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
     }
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to launch: {}", e))?;
+    // Reap the child when it exits — dropping the handle would leave a
+    // zombie process for the lifetime of Raz.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -559,13 +597,40 @@ pub fn update_link(
     Ok(updated)
 }
 
+/// Hard cap on a downloaded favicon — anything bigger isn't an icon.
+const MAX_FAVICON_BYTES: u64 = 512 * 1024;
+
+/// Download `url` and return the body if it looks like an image (2xx status,
+/// non-HTML content type, non-empty, within the size cap).
+fn fetch_icon_bytes(client: &reqwest::blocking::Client, url: &str) -> Option<Vec<u8>> {
+    let resp = client.get(url).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    // An error page served with 200 would get cached as a "favicon" and
+    // rendered as a broken image forever — reject HTML outright.
+    if content_type.starts_with("text/html") {
+        return None;
+    }
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    resp.take(MAX_FAVICON_BYTES).read_to_end(&mut bytes).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(bytes)
+}
+
 #[tauri::command]
 pub fn fetch_favicon(url: String) -> Result<String, String> {
-    let hostname = url::Url::parse(&url)
-        .map_err(|e| format!("Invalid URL: {}", e))?
-        .host_str()
-        .ok_or("No host in URL")?
-        .to_string();
+    let parsed = url::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
+    let hostname = parsed.host_str().ok_or("No host in URL")?.to_string();
 
     let cache_dir = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -580,21 +645,71 @@ pub fn fetch_favicon(url: String) -> Result<String, String> {
         return Ok(dest.to_string_lossy().to_string());
     }
 
-    // Try Google favicon service
-    let favicon_url = format!("https://www.google.com/s2/favicons?domain={}&sz=64", hostname);
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let resp = client.get(&favicon_url).send().map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err("Failed to fetch favicon".to_string());
-    }
+    // Prefer the site's own favicon (works for LAN/intranet hosts and
+    // doesn't leak browsing targets); fall back to the Google service.
+    let direct_url = format!("{}/favicon.ico", parsed.origin().ascii_serialization());
+    let google_url = format!("https://www.google.com/s2/favicons?domain={}&sz=64", hostname);
+    let bytes = fetch_icon_bytes(&client, &direct_url)
+        .or_else(|| fetch_icon_bytes(&client, &google_url))
+        .ok_or("Failed to fetch favicon")?;
 
-    let bytes = resp.bytes().map_err(|e| e.to_string())?;
     std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
     Ok(dest.to_string_lossy().to_string())
+}
+
+/// Only read this much of a page when looking for its <title> — enough for
+/// any sane <head>, and keeps a huge download from ballooning memory.
+const MAX_METADATA_BYTES: u64 = 256 * 1024;
+
+/// Decode the HTML entities that commonly appear in page titles.
+fn decode_html_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find('&') {
+        out.push_str(&rest[..pos]);
+        rest = &rest[pos..];
+        let end = match rest.find(';') {
+            // Entities are short; a distant ';' means this '&' is literal.
+            Some(e) if e <= 10 => e,
+            _ => {
+                out.push('&');
+                rest = &rest[1..];
+                continue;
+            }
+        };
+        let entity = &rest[1..end];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            _ => entity
+                .strip_prefix("#x")
+                .or_else(|| entity.strip_prefix("#X"))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| entity.strip_prefix('#').and_then(|dec| dec.parse().ok()))
+                .and_then(char::from_u32),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[end + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[tauri::command]
@@ -610,13 +725,29 @@ pub fn fetch_url_metadata(url: String) -> Result<String, String> {
         return Err("Failed to fetch URL".to_string());
     }
 
-    let body = resp.text().map_err(|e| e.to_string())?;
+    // Only HTML can have a <title>; don't slurp a binary or a JSON API.
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !content_type.is_empty() && !content_type.contains("html") {
+        return Err("Not an HTML page".to_string());
+    }
+
+    use std::io::Read;
+    let mut raw = Vec::new();
+    resp.take(MAX_METADATA_BYTES)
+        .read_to_end(&mut raw)
+        .map_err(|e| e.to_string())?;
+    let body = String::from_utf8_lossy(&raw);
 
     // Extract <title>
     if let Some(start) = body.find("<title>").or_else(|| body.find("<Title>")).or_else(|| body.find("<TITLE>")) {
         let after = &body[start + 7..];
         if let Some(end) = after.find("</title>").or_else(|| after.find("</Title>")).or_else(|| after.find("</TITLE>")) {
-            let title = after[..end].trim().to_string();
+            let title = decode_html_entities(after[..end].trim());
             if !title.is_empty() {
                 return Ok(title);
             }
@@ -791,7 +922,14 @@ pub fn update_settings(
     }
     let result = {
         let mut config = state.0.lock().unwrap();
+        let prev = config.settings.clone();
         config.settings = settings;
+        // The Settings form doesn't carry window geometry — keep what the
+        // window-event handlers persisted.
+        config.settings.window_width = prev.window_width;
+        config.settings.window_height = prev.window_height;
+        config.settings.window_x = prev.window_x;
+        config.settings.window_y = prev.window_y;
         config.settings.clone()
     };
     save_snapshot(&state)?;
@@ -882,5 +1020,25 @@ mod tests {
         assert_eq!(normalize_url("https://example.com"), "https://example.com");
         assert_eq!(normalize_url("http://localhost:3000"), "http://localhost:3000");
         assert_eq!(normalize_url(""), "");
+    }
+
+    #[test]
+    fn decodes_named_entities() {
+        assert_eq!(decode_html_entities("Foo &amp; Bar"), "Foo & Bar");
+        assert_eq!(decode_html_entities("&lt;tag&gt; &quot;q&quot; &apos;a&apos;"), "<tag> \"q\" 'a'");
+    }
+
+    #[test]
+    fn decodes_numeric_entities() {
+        assert_eq!(decode_html_entities("&#65;&#x42;&#X43;"), "ABC");
+        assert_eq!(decode_html_entities("caf&#233;"), "café");
+    }
+
+    #[test]
+    fn leaves_plain_and_invalid_input_alone() {
+        assert_eq!(decode_html_entities("no entities here"), "no entities here");
+        assert_eq!(decode_html_entities("AT&T rocks"), "AT&T rocks");
+        assert_eq!(decode_html_entities("&notareal;"), "&notareal;");
+        assert_eq!(decode_html_entities("trailing &"), "trailing &");
     }
 }

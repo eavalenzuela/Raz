@@ -15,6 +15,18 @@
   let unlisten = null;
   let unlistenImport = null;
   let pollInterval = null;
+  let actionError = $state(null);
+  let errorTimer = null;
+
+  // Keep the frontend buffer bounded like the backend's (servers.rs
+  // MAX_OUTPUT_LINES) so a chatty server can't balloon the webview.
+  const MAX_LOG_LINES = 5000;
+
+  function showError(message) {
+    actionError = message;
+    if (errorTimer) clearTimeout(errorTimer);
+    errorTimer = setTimeout(() => actionError = null, 8000);
+  }
 
   // Log search/filter
   let logSearch = $state("");
@@ -59,10 +71,20 @@
     unlisten = await listen("server-output-batch", (event) => {
       const [id, lines] = event.payload;
       if (id === selectedServerId && lines.length) {
-        outputLines = [...outputLines, ...lines];
-        requestAnimationFrame(() => {
-          if (outputEl) outputEl.scrollTop = outputEl.scrollHeight;
-        });
+        // Sticky scroll: only follow new output if the user is already at
+        // the bottom, so scrolling up to read isn't fought.
+        const atBottom = !outputEl ||
+          outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight < 40;
+        let next = [...outputLines, ...lines];
+        if (next.length > MAX_LOG_LINES) {
+          next = next.slice(next.length - MAX_LOG_LINES);
+        }
+        outputLines = next;
+        if (atBottom) {
+          requestAnimationFrame(() => {
+            if (outputEl) outputEl.scrollTop = outputEl.scrollHeight;
+          });
+        }
       }
     });
 
@@ -77,6 +99,7 @@
     if (unlistenImport) unlistenImport();
     if (pollInterval) clearInterval(pollInterval);
     if (resourceInterval) clearInterval(resourceInterval);
+    if (errorTimer) clearTimeout(errorTimer);
   });
 
   async function loadServers() {
@@ -175,7 +198,7 @@
       await invoke("start_server", { id: server.id });
       await pollStatuses();
     } catch (e) {
-      console.error("Failed to start server:", e);
+      showError(`Failed to start "${server.name}": ${e}`);
     }
   }
 
@@ -185,7 +208,7 @@
       await pollStatuses();
       resources = null;
     } catch (e) {
-      console.error("Failed to stop server:", e);
+      showError(`Failed to stop "${server.name}": ${e}`);
     }
   }
 
@@ -194,7 +217,17 @@
       await invoke("restart_server", { id: server.id });
       await pollStatuses();
     } catch (e) {
-      console.error("Failed to restart server:", e);
+      showError(`Failed to restart "${server.name}": ${e}`);
+    }
+    contextMenu = null;
+  }
+
+  async function duplicateServer(server) {
+    try {
+      await invoke("duplicate_server", { id: server.id });
+      await loadServers();
+    } catch (e) {
+      showError(`Failed to duplicate "${server.name}": ${e}`);
     }
     contextMenu = null;
   }
@@ -269,8 +302,18 @@
       try {
         await invoke("export_server_log", { id: selectedServerId, path });
       } catch (e) {
-        console.error("Failed to export log:", e);
+        showError(`Failed to export log: ${e}`);
       }
+    }
+  }
+
+  async function clearLog() {
+    if (!selectedServerId) return;
+    try {
+      await invoke("clear_server_log", { id: selectedServerId });
+      outputLines = [];
+    } catch (e) {
+      showError(`Failed to clear log: ${e}`);
     }
   }
 
@@ -296,6 +339,13 @@
     <h2>Servers</h2>
     <button class="add-btn" onclick={openAddModal}>+ Add Server</button>
   </div>
+
+  {#if actionError}
+    <div class="error-banner" role="alert">
+      <span class="error-text">{actionError}</span>
+      <button class="error-dismiss" onclick={() => actionError = null} title="Dismiss">&times;</button>
+    </div>
+  {/if}
 
   {#if servers.length === 0}
     <div class="empty-state">
@@ -353,6 +403,7 @@
                 placeholder="Search logs..."
                 bind:value={logSearch}
               />
+              <button class="export-btn" onclick={clearLog} title="Clear log">Clear</button>
               <button class="export-btn" onclick={exportLog} title="Export log">Export</button>
             </div>
           </div>
@@ -388,6 +439,7 @@
 {#if contextMenu}
   <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
     <button onclick={() => openEditModal(contextMenu.server)}>Edit</button>
+    <button onclick={() => duplicateServer(contextMenu.server)}>Duplicate</button>
     <button onclick={() => openDirectory(contextMenu.server)}>Open Directory</button>
     <button onclick={() => viewLogs(contextMenu.server)}>View Logs</button>
     {#if serverState(contextMenu.server) === "running"}
@@ -522,6 +574,36 @@
 
   .add-btn:hover {
     background: var(--hover);
+  }
+
+  .error-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    border: 1px solid #ef4444;
+    border-radius: 6px;
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+    font-size: 0.85em;
+    flex-shrink: 0;
+  }
+
+  .error-text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .error-dismiss {
+    background: none;
+    border: none;
+    color: #ef4444;
+    cursor: pointer;
+    font-size: 1.2em;
+    padding: 0 4px;
+    flex-shrink: 0;
   }
 
   .empty-state {

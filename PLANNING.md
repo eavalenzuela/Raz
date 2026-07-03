@@ -92,12 +92,20 @@ A minimal personal launcher and homepage. Not a power-user dashboard — a clean
 - [x] Log retention — logs survive stop/crash and can still be viewed/exported
 - [x] Crash detection — distinct "crashed" state plus desktop notification
 - [x] Process-group termination — stop/quit kills the whole process tree, not just `bash -c`
+- [x] ANSI stripping — color codes removed from log lines
+- [x] Clear log action — wipe the retained buffer from the viewer
+- [x] Stable-run retry reset — a run ≥60s resets the auto-restart counter
+- [x] Tray start/stop — toggle servers from the tray menu, crashed shown distinctly
+- [x] Duplicate server — clone an entry from the context menu
 
 ### General
 - [x] Command palette — Ctrl+K fuzzy search across apps, links, and servers
 - [x] Config export/import — JSON backup and restore from the menu
 - [x] Start at login — XDG autostart entry managed from Settings
 - [x] Monitor uptime history — last 30 check results rendered as a bead strip
+- [x] Monitor pause/resume — per-monitor enabled flag with context-menu toggle
+- [x] Window geometry persistence — size/position restored across launches
+- [x] Duplicate app — clone an entry from the context menu
 
 ### Future Considerations
 - Global hotkey / Spotlight-style summoning (system-wide; in-app palette exists)

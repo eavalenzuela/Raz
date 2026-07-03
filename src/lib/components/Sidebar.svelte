@@ -100,11 +100,13 @@
   }
 
   function monitorState(monitor) {
+    if (monitor.enabled === false) return "paused";
     const s = monitorStatuses[monitor.id];
     return s ? s.state : "unknown";
   }
 
   function monitorHistory(monitor) {
+    if (monitor.enabled === false) return [];
     const s = monitorStatuses[monitor.id];
     return s?.history || [];
   }
@@ -180,6 +182,17 @@
     contextMenu = null;
     await loadMonitors();
   }
+
+  async function toggleMonitorEnabled(monitor) {
+    try {
+      await invoke("set_monitor_enabled", { id: monitor.id, enabled: monitor.enabled === false });
+    } catch (e) {
+      console.error("Failed to toggle monitor:", e);
+    }
+    contextMenu = null;
+    await loadMonitors();
+    await pollMonitorStatuses();
+  }
 </script>
 
 <svelte:window onclick={closeContextMenu} />
@@ -251,6 +264,9 @@
 {#if contextMenu}
   <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
     <button onclick={() => openEditMonitor(contextMenu.monitor)}>Edit</button>
+    <button onclick={() => toggleMonitorEnabled(contextMenu.monitor)}>
+      {contextMenu.monitor.enabled === false ? "Resume" : "Pause"}
+    </button>
     <hr />
     <button class="danger" onclick={() => removeMonitor(contextMenu.monitor)}>Remove</button>
   </div>
@@ -508,6 +524,16 @@
   .monitor-dot.up { background: #22c55e; }
   .monitor-dot.down { background: #ef4444; }
   .monitor-dot.unknown { background: #a3a3a3; }
+  .monitor-dot.paused {
+    background: transparent;
+    border: 1.5px solid #a3a3a3;
+    width: 6px;
+    height: 6px;
+  }
+
+  .monitor-item:has(.monitor-dot.paused) .monitor-name {
+    color: var(--text-muted);
+  }
 
   .monitor-name {
     flex: 1;

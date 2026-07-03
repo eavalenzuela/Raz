@@ -212,6 +212,16 @@
     await loadApps();
   }
 
+  async function duplicateApp(app) {
+    try {
+      await invoke("duplicate_app", { id: app.id });
+      await loadApps();
+    } catch (e) {
+      console.error("Duplicate failed:", e);
+    }
+    contextMenu = null;
+  }
+
   async function pinApp(app) {
     try {
       await invoke("pin_item", { sourceId: app.id, sourceType: "app", name: app.name });
@@ -424,6 +434,7 @@
 {#if contextMenu}
   <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
     <button onclick={() => openEditModal(contextMenu.app)}>Edit</button>
+    <button onclick={() => duplicateApp(contextMenu.app)}>Duplicate</button>
     <button onclick={() => openDirectory(contextMenu.app)}>Open Directory</button>
     <button onclick={() => pinApp(contextMenu.app)}>Pin to Sidebar</button>
     <hr />

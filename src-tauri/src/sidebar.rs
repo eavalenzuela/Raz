@@ -146,6 +146,29 @@ pub fn remove_status_monitor(
 }
 
 #[tauri::command]
+pub fn set_monitor_enabled(
+    state: State<ConfigState>,
+    monitor_state: State<MonitorState>,
+    app_handle: AppHandle,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    {
+        let mut config = state.0.lock().unwrap();
+        let monitor = config.status_monitors.iter_mut().find(|m| m.id == id).ok_or("Monitor not found")?;
+        monitor.enabled = enabled;
+    }
+    if !enabled {
+        // Drop the cached status immediately so the status bar and sidebar
+        // stop counting a paused monitor.
+        monitor_state.statuses.lock().unwrap().remove(&id);
+    }
+    save_snapshot(&state)?;
+    let _ = app_handle.emit("monitor-update", ());
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_monitor_statuses(monitor_state: State<MonitorState>) -> Vec<MonitorStatus> {
     let statuses = monitor_state.statuses.lock().unwrap();
     statuses
@@ -157,6 +180,17 @@ pub fn get_monitor_statuses(monitor_state: State<MonitorState>) -> Vec<MonitorSt
             history: entry.history.clone(),
         })
         .collect()
+}
+
+/// The ping target is handed to the `ping` CLI, which has no `--` separator —
+/// restrict it to hostname/IP characters so a target like "-f" can't inject
+/// options.
+fn valid_ping_target(target: &str) -> bool {
+    !target.is_empty()
+        && !target.starts_with('-')
+        && target
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'))
 }
 
 fn check_target(target: &str, check_type: &str) -> bool {
@@ -179,6 +213,9 @@ fn check_target(target: &str, check_type: &str) -> bool {
             }
         }
         "ping" => {
+            if !valid_ping_target(target) {
+                return false;
+            }
             // Use system ping command
             std::process::Command::new("ping")
                 .args(["-c", "1", "-W", "5", target])
@@ -221,16 +258,22 @@ pub fn start_monitor_loop(
                 break;
             }
 
-            let monitors = {
+            // Paused monitors are excluded here, so they're never checked and
+            // their trackers/statuses are pruned like removed ones — a
+            // re-enabled monitor starts fresh and announces immediately.
+            let monitors: Vec<StatusMonitor> = {
                 let config_state = handle.try_state::<ConfigState>().unwrap();
                 let config = config_state.0.lock().unwrap();
-                config.status_monitors.clone()
+                config.status_monitors.iter().filter(|m| m.enabled).cloned().collect()
             };
 
             let now = Instant::now();
             let monitor_ids: std::collections::HashSet<String> =
                 monitors.iter().map(|m| m.id.clone()).collect();
             trackers.retain(|id, _| monitor_ids.contains(id));
+            // Also prune cached statuses, or monitors removed by a config
+            // import would keep counting in the status bar forever.
+            statuses.lock().unwrap().retain(|id, _| monitor_ids.contains(id));
 
             // Run every due check on its own thread so one slow or down
             // target (up to a 10s timeout) can't delay the others.
@@ -333,4 +376,26 @@ pub fn start_monitor_loop(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_hosts_and_ips() {
+        assert!(valid_ping_target("example.com"));
+        assert!(valid_ping_target("192.168.1.1"));
+        assert!(valid_ping_target("fe80::1"));
+        assert!(valid_ping_target("my-nas.local"));
+    }
+
+    #[test]
+    fn rejects_option_injection_and_junk() {
+        assert!(!valid_ping_target("-f"));
+        assert!(!valid_ping_target("--help"));
+        assert!(!valid_ping_target(""));
+        assert!(!valid_ping_target("host; rm -rf /"));
+        assert!(!valid_ping_target("a b"));
+    }
 }

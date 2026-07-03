@@ -67,6 +67,10 @@ const MAX_LINE_BYTES: usize = 8 * 1024;
 const EMIT_INTERVAL_MS: u64 = 100;
 /// How long to wait for a SIGTERM'd process group before escalating to SIGKILL.
 const TERM_GRACE_MS: u64 = 2000;
+/// A run at least this long counts as stable: the auto-restart retry counter
+/// resets, so a server that crashed a few times weeks ago isn't permanently
+/// denied restarts.
+const STABLE_RUN_SECS: u64 = 60;
 
 fn timestamp() -> String {
     let now = chrono::Local::now();
@@ -84,6 +88,57 @@ fn truncate_line(mut line: String) -> String {
         line.push_str(" …[truncated]");
     }
     line
+}
+
+/// Strip ANSI escape sequences (CSI color/cursor codes, OSC titles) so
+/// colored output from dev servers reads cleanly in the log viewer and
+/// exported logs.
+fn strip_ansi(s: &str) -> String {
+    if !s.contains('\u{1b}') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            // CSI: ESC [ params/intermediates … final byte in @–~
+            Some('[') => {
+                chars.next();
+                while let Some(&n) = chars.peek() {
+                    chars.next();
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            // OSC: ESC ] … terminated by BEL or ST (ESC \)
+            Some(']') => {
+                chars.next();
+                while let Some(&n) = chars.peek() {
+                    chars.next();
+                    if n == '\u{7}' {
+                        break;
+                    }
+                    if n == '\u{1b}' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            // Two-character escapes (ESC c, ESC =, …)
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
 }
 
 /// Send SIGTERM to the child's whole process group (raw commands run under
@@ -225,6 +280,7 @@ fn spawn_server(
         std::thread::spawn(move || {
             for line in reader.lines() {
                 let Ok(line) = line else { continue };
+                let line = strip_ansi(&line);
                 let stamped = if prefix_stderr {
                     format!("[{}] [stderr] {}", timestamp(), line)
                 } else {
@@ -331,6 +387,38 @@ pub fn update_server(
 }
 
 #[tauri::command]
+pub fn duplicate_server(
+    state: State<ConfigState>,
+    app_handle: AppHandle,
+    id: String,
+) -> Result<ServerEntry, String> {
+    let entry = {
+        let mut config = state.0.lock().unwrap();
+        let idx = config.servers.iter().position(|s| s.id == id).ok_or("Server not found")?;
+        let src = &config.servers[idx];
+        let copy = ServerEntry::new(
+            format!("{} (copy)", src.name),
+            src.raw_command.clone(),
+            src.executable.clone(),
+            src.arguments.clone(),
+            src.working_directory.clone(),
+            src.env_vars.clone(),
+            // Never duplicate auto-launch — two copies of the same server
+            // racing for the same port at startup is a footgun.
+            false,
+            src.auto_restart,
+            src.max_retries,
+            src.restart_cooldown_secs,
+        );
+        config.servers.insert(idx + 1, copy.clone());
+        copy
+    };
+    save_snapshot(&state)?;
+    let _ = app_handle.emit("tray-update", ());
+    Ok(entry)
+}
+
+#[tauri::command]
 pub fn remove_server(
     state: State<ConfigState>,
     manager: State<ServerManager>,
@@ -424,6 +512,13 @@ pub fn get_server_output(manager: State<ServerManager>, id: String) -> Vec<Strin
     logs.get(&id)
         .map(|buf| buf.lock().unwrap().clone())
         .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn clear_server_log(manager: State<ServerManager>, id: String) {
+    if let Some(buf) = manager.logs.lock().unwrap().get(&id) {
+        buf.lock().unwrap().clear();
+    }
 }
 
 #[tauri::command]
@@ -568,7 +663,14 @@ pub fn start_server_watcher(app_handle: &AppHandle) {
                 );
             }
 
-            if !entry.auto_restart || old_server.restart_count >= entry.max_retries {
+            // A stable run wipes the retry history — only rapid crash loops
+            // should exhaust max_retries.
+            let prior_restarts = if old_server.started_at.elapsed() >= Duration::from_secs(STABLE_RUN_SECS) {
+                0
+            } else {
+                old_server.restart_count
+            };
+            if !entry.auto_restart || prior_restarts >= entry.max_retries {
                 continue;
             }
             let cooldown = Duration::from_secs(entry.restart_cooldown_secs);
@@ -579,7 +681,7 @@ pub fn start_server_watcher(app_handle: &AppHandle) {
                 let manager = handle_inner.try_state::<ServerManager>().unwrap();
                 let log_buf = manager.log_buffer(&id_inner);
                 if let Ok(mut new_server) = spawn_server(&entry, &handle_inner, log_buf) {
-                    new_server.restart_count = old_server.restart_count + 1;
+                    new_server.restart_count = prior_restarts + 1;
                     let mut running = manager.running.lock().unwrap();
                     running.insert(id_inner.clone(), new_server);
                     drop(running);
@@ -623,5 +725,34 @@ pub fn auto_launch_servers(config: &ConfigState, manager: &ServerManager, app_ha
                 running.insert(entry.id.clone(), server);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_csi_color_codes() {
+        assert_eq!(strip_ansi("\u{1b}[32mready\u{1b}[0m in 120ms"), "ready in 120ms");
+        assert_eq!(strip_ansi("\u{1b}[1;31;40merror\u{1b}[m"), "error");
+    }
+
+    #[test]
+    fn strips_osc_sequences() {
+        assert_eq!(strip_ansi("\u{1b}]0;window title\u{7}text"), "text");
+        assert_eq!(strip_ansi("\u{1b}]8;;https://x\u{1b}\\link"), "link");
+    }
+
+    #[test]
+    fn leaves_plain_text_alone() {
+        assert_eq!(strip_ansi("plain output"), "plain output");
+        assert_eq!(strip_ansi(""), "");
+    }
+
+    #[test]
+    fn handles_truncated_escape() {
+        assert_eq!(strip_ansi("dangling \u{1b}"), "dangling ");
+        assert_eq!(strip_ansi("cut \u{1b}[31"), "cut ");
     }
 }

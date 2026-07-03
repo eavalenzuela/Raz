@@ -93,6 +93,9 @@ pub struct StatusMonitor {
     pub check_type: String, // "http" or "ping"
     #[serde(default = "default_check_interval")]
     pub check_interval_secs: u64,
+    /// Paused monitors are skipped by the check loop but stay configured.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 fn default_check_interval() -> u64 {
@@ -107,6 +110,7 @@ impl StatusMonitor {
             target,
             check_type,
             check_interval_secs,
+            enabled: true,
         }
     }
 }
@@ -125,6 +129,15 @@ pub struct Settings {
     pub minimize_to_tray: bool,
     #[serde(default)]
     pub autostart: bool,
+    /// Last window geometry, persisted on close/quit and restored at startup.
+    #[serde(default)]
+    pub window_width: Option<u32>,
+    #[serde(default)]
+    pub window_height: Option<u32>,
+    #[serde(default)]
+    pub window_x: Option<i32>,
+    #[serde(default)]
+    pub window_y: Option<i32>,
 }
 
 fn default_true() -> bool {
@@ -140,6 +153,10 @@ impl Default for Settings {
             notify_on_up: true,
             minimize_to_tray: true,
             autostart: false,
+            window_width: None,
+            window_height: None,
+            window_x: None,
+            window_y: None,
         }
     }
 }
@@ -317,6 +334,7 @@ mod tests {
         assert_eq!(parsed.servers[0].max_retries, 5);
         assert_eq!(parsed.status_monitors.len(), 1);
         assert_eq!(parsed.status_monitors[0].check_interval_secs, 30);
+        assert!(parsed.status_monitors[0].enabled);
         assert!(!parsed.settings.notifications_enabled);
         assert!(parsed.settings.minimize_to_tray); // default still applies
     }
@@ -330,5 +348,14 @@ mod tests {
         assert!(!parsed.servers[0].auto_restart);
         assert!(parsed.settings.notifications_enabled);
         assert!(!parsed.settings.autostart);
+        assert_eq!(parsed.settings.window_width, None);
+    }
+
+    #[test]
+    fn pre_pause_monitor_configs_default_to_enabled() {
+        let json = r#"{"status_monitors":[{"id":"m","name":"M","target":"https://x","check_type":"http"}]}"#;
+        let parsed: RazConfig = serde_json::from_str(json).unwrap();
+        assert!(parsed.status_monitors[0].enabled);
+        assert_eq!(parsed.status_monitors[0].check_interval_secs, 60);
     }
 }
