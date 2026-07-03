@@ -123,6 +123,8 @@ pub struct Settings {
     pub notify_on_up: bool,
     #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 fn default_true() -> bool {
@@ -137,6 +139,7 @@ impl Default for Settings {
             notify_on_down: true,
             notify_on_up: true,
             minimize_to_tray: true,
+            autostart: false,
         }
     }
 }
@@ -326,5 +329,6 @@ mod tests {
         assert_eq!(parsed.servers[0].restart_cooldown_secs, 5);
         assert!(!parsed.servers[0].auto_restart);
         assert!(parsed.settings.notifications_enabled);
+        assert!(!parsed.settings.autostart);
     }
 }

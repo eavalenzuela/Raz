@@ -3,12 +3,23 @@
   import TabBar from "$lib/components/TabBar.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import StatusBar from "$lib/components/StatusBar.svelte";
+  import CommandPalette from "$lib/components/CommandPalette.svelte";
   import AppsTab from "$lib/tabs/AppsTab.svelte";
   import LinksTab from "$lib/tabs/LinksTab.svelte";
   import ServersTab from "$lib/tabs/ServersTab.svelte";
 
   let activeTab = $state("apps");
+  let paletteOpen = $state(false);
+
+  function onWindowKeydown(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      paletteOpen = !paletteOpen;
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="app-shell">
   <header class="toolbar">
@@ -33,6 +44,8 @@
 
   <StatusBar />
 </div>
+
+<CommandPalette bind:open={paletteOpen} />
 
 <style>
   :global(*) {

@@ -1,6 +1,7 @@
 <script>
   import { invoke } from "@tauri-apps/api/core";
-  import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
+  import { onMount, onDestroy } from "svelte";
 
   let links = $state([]);
   let showModal = $state(false);
@@ -18,7 +19,16 @@
   let formFolder = $state("");
   let fetchingTitle = $state(false);
 
-  onMount(loadLinks);
+  let unlistenImport = null;
+
+  onMount(async () => {
+    await loadLinks();
+    unlistenImport = await listen("config-imported", loadLinks);
+  });
+
+  onDestroy(() => {
+    if (unlistenImport) unlistenImport();
+  });
 
   async function loadLinks() {
     links = await invoke("get_links");

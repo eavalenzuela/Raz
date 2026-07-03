@@ -22,16 +22,40 @@ pub struct ServerResources {
 
 pub struct RunningServer {
     pub(crate) child: Child,
-    output: Arc<Mutex<Vec<String>>>,
     started_at: Instant,
     restart_count: u32,
 }
 
-pub struct ServerManager(pub Mutex<HashMap<String, RunningServer>>);
+/// How a server last exited: cleanly (stopped by the user or exit code 0)
+/// or crashed (non-zero exit / signal / wait error).
+pub struct LastExit {
+    pub crashed: bool,
+}
+
+type LogBuffer = Arc<Mutex<Vec<String>>>;
+
+pub struct ServerManager {
+    pub running: Mutex<HashMap<String, RunningServer>>,
+    /// Per-server log buffers. Kept separate from `running` so logs survive
+    /// a stop or crash and can still be viewed/exported afterwards.
+    pub logs: Mutex<HashMap<String, LogBuffer>>,
+    pub last_exit: Mutex<HashMap<String, LastExit>>,
+}
 
 impl ServerManager {
     pub fn new() -> Self {
-        Self(Mutex::new(HashMap::new()))
+        Self {
+            running: Mutex::new(HashMap::new()),
+            logs: Mutex::new(HashMap::new()),
+            last_exit: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn log_buffer(&self, id: &str) -> LogBuffer {
+        let mut logs = self.logs.lock().unwrap();
+        logs.entry(id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+            .clone()
     }
 }
 
@@ -41,6 +65,8 @@ const MAX_OUTPUT_LINES: usize = 5000;
 const MAX_LINE_BYTES: usize = 8 * 1024;
 /// Coalesce stdout/stderr emits to the UI to at most this often per server.
 const EMIT_INTERVAL_MS: u64 = 100;
+/// How long to wait for a SIGTERM'd process group before escalating to SIGKILL.
+const TERM_GRACE_MS: u64 = 2000;
 
 fn timestamp() -> String {
     let now = chrono::Local::now();
@@ -60,9 +86,73 @@ fn truncate_line(mut line: String) -> String {
     line
 }
 
+/// Send SIGTERM to the child's whole process group (raw commands run under
+/// `bash -c`, so the actual server is a grandchild — killing just the direct
+/// child would orphan it). Escalates to SIGKILL after a grace period.
+fn terminate_child(child: &mut Child) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let pgid = child.id() as i32;
+        unsafe {
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+        for _ in 0..(TERM_GRACE_MS / 100) {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(e) => return Err(format!("Failed to stop: {}", e)),
+            }
+        }
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        child.kill().map_err(|e| format!("Failed to stop: {}", e))?;
+    }
+    let _ = child.wait();
+    Ok(())
+}
+
+/// Terminate every managed server. Called on quit so we don't orphan the
+/// processes we spawned. SIGTERMs all groups first, then reaps with a short
+/// grace period and SIGKILLs stragglers.
+pub fn shutdown_all_servers(app_handle: &AppHandle) {
+    let Some(manager) = app_handle.try_state::<ServerManager>() else {
+        return;
+    };
+    let servers: Vec<(String, RunningServer)> = {
+        let mut running = manager.running.lock().unwrap();
+        running.drain().collect()
+    };
+    if servers.is_empty() {
+        return;
+    }
+    #[cfg(unix)]
+    for (_, server) in &servers {
+        unsafe {
+            libc::kill(-(server.child.id() as i32), libc::SIGTERM);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    for (_, mut server) in servers {
+        if let Ok(Some(_)) = server.child.try_wait() {
+            continue;
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(server.child.id() as i32), libc::SIGKILL);
+        }
+        let _ = server.child.kill();
+        let _ = server.child.wait();
+    }
+}
+
 /// Spawns a background thread that batches emits for one (server_id, stream).
 /// Returns a closure-friendly sender: push lines into the Vec, the thread
-/// drains and emits at most every EMIT_INTERVAL_MS.
+/// drains and emits at most every EMIT_INTERVAL_MS. The thread exits on its
+/// own once all producers have dropped their handle and the queue is empty.
 fn start_emit_batcher(handle: AppHandle, server_id: String) -> Arc<Mutex<Vec<String>>> {
     let pending: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let pending_clone = Arc::clone(&pending);
@@ -72,6 +162,11 @@ fn start_emit_batcher(handle: AppHandle, server_id: String) -> Arc<Mutex<Vec<Str
             let batch: Vec<String> = {
                 let mut q = pending_clone.lock().unwrap();
                 if q.is_empty() {
+                    // Sole owner + empty queue means the reader threads are
+                    // done: the process exited. Don't leak this thread.
+                    if Arc::strong_count(&pending_clone) == 1 {
+                        break;
+                    }
                     continue;
                 }
                 std::mem::take(&mut *q)
@@ -85,35 +180,48 @@ fn start_emit_batcher(handle: AppHandle, server_id: String) -> Arc<Mutex<Vec<Str
 fn spawn_server(
     entry: &ServerEntry,
     app_handle: &AppHandle,
+    output: LogBuffer,
 ) -> Result<RunningServer, String> {
-    let mut child = if let Some(ref raw) = entry.raw_command {
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(raw);
-        if let Some(ref dir) = entry.working_directory {
-            cmd.current_dir(dir);
-        }
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd.spawn().map_err(|e| format!("Failed to start: {}", e))?
+    let mut cmd = if let Some(ref raw) = entry.raw_command {
+        let mut c = Command::new("bash");
+        c.arg("-c").arg(raw);
+        c
     } else if let Some(ref executable) = entry.executable {
-        let mut cmd = Command::new(executable);
-        cmd.args(&entry.arguments);
-        if let Some(ref dir) = entry.working_directory {
-            cmd.current_dir(dir);
-        }
-        for env in &entry.env_vars {
-            cmd.env(&env.key, &env.value);
-        }
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd.spawn().map_err(|e| format!("Failed to start: {}", e))?
+        let mut c = Command::new(executable);
+        c.args(&entry.arguments);
+        c
     } else {
         return Err("No command or executable configured".to_string());
     };
 
-    let output = Arc::new(Mutex::new(Vec::<String>::new()));
+    if let Some(ref dir) = entry.working_directory {
+        cmd.current_dir(dir);
+    }
+    for env in &entry.env_vars {
+        cmd.env(&env.key, &env.value);
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Own process group so stop/quit can kill the whole tree (bash -c children).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to start: {}", e))?;
+
     let server_id = entry.id.clone();
     let pending = start_emit_batcher(app_handle.clone(), server_id.clone());
 
-    let consume = |reader: Box<dyn BufRead + Send>, prefix_stderr: bool, output: Arc<Mutex<Vec<String>>>, pending: Arc<Mutex<Vec<String>>>| {
+    // Mark the start in the (possibly retained) log so runs are separable.
+    let marker = format!("[{}] ── server started ──", timestamp());
+    {
+        let mut buf = output.lock().unwrap();
+        buf.push(marker.clone());
+    }
+    pending.lock().unwrap().push(marker);
+
+    let consume = |reader: Box<dyn BufRead + Send>, prefix_stderr: bool, output: LogBuffer, pending: Arc<Mutex<Vec<String>>>| {
         std::thread::spawn(move || {
             for line in reader.lines() {
                 let Ok(line) = line else { continue };
@@ -145,7 +253,6 @@ fn spawn_server(
 
     Ok(RunningServer {
         child,
-        output,
         started_at: Instant::now(),
         restart_count: 0,
     })
@@ -230,12 +337,15 @@ pub fn remove_server(
     app_handle: AppHandle,
     id: String,
 ) -> Result<(), String> {
-    {
-        let mut running = manager.0.lock().unwrap();
-        if let Some(mut server) = running.remove(&id) {
-            let _ = server.child.kill();
-        }
+    let server = {
+        let mut running = manager.running.lock().unwrap();
+        running.remove(&id)
+    };
+    if let Some(mut server) = server {
+        let _ = terminate_child(&mut server.child);
     }
+    manager.logs.lock().unwrap().remove(&id);
+    manager.last_exit.lock().unwrap().remove(&id);
     {
         let mut config = state.0.lock().unwrap();
         config.servers.retain(|s| s.id != id);
@@ -252,67 +362,88 @@ pub fn start_server(
     app_handle: AppHandle,
     id: String,
 ) -> Result<(), String> {
+    {
+        let running = manager.running.lock().unwrap();
+        if running.contains_key(&id) {
+            return Err("Server is already running".to_string());
+        }
+    }
+
     let entry = {
         let config = state.0.lock().unwrap();
         config.servers.iter().find(|s| s.id == id).ok_or("Server not found")?.clone()
     };
 
-    let running_server = spawn_server(&entry, &app_handle)?;
+    let log_buf = manager.log_buffer(&id);
+    let running_server = spawn_server(&entry, &app_handle, log_buf)?;
 
     {
-        let mut running = manager.0.lock().unwrap();
-        running.insert(id, running_server);
+        let mut running = manager.running.lock().unwrap();
+        running.insert(id.clone(), running_server);
     }
+    manager.last_exit.lock().unwrap().remove(&id);
     let _ = app_handle.emit("tray-update", ());
     Ok(())
 }
 
 #[tauri::command]
 pub fn stop_server(manager: State<ServerManager>, app_handle: AppHandle, id: String) -> Result<(), String> {
-    {
-        let mut running = manager.0.lock().unwrap();
-        if let Some(mut server) = running.remove(&id) {
-            server.child.kill().map_err(|e| format!("Failed to stop: {}", e))?;
-            let _ = server.child.wait();
-        } else {
-            return Err("Server is not running".to_string());
-        }
-    }
+    let server = {
+        let mut running = manager.running.lock().unwrap();
+        running.remove(&id)
+    };
+    let Some(mut server) = server else {
+        return Err("Server is not running".to_string());
+    };
+    terminate_child(&mut server.child)?;
+    manager.last_exit.lock().unwrap().insert(id, LastExit { crashed: false });
     let _ = app_handle.emit("tray-update", ());
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_server_output(manager: State<ServerManager>, id: String) -> Vec<String> {
-    let running = manager.0.lock().unwrap();
-    if let Some(server) = running.get(&id) {
-        let output = server.output.lock().unwrap();
-        output.clone()
-    } else {
-        Vec::new()
+pub fn restart_server(
+    state: State<ConfigState>,
+    manager: State<ServerManager>,
+    app_handle: AppHandle,
+    id: String,
+) -> Result<(), String> {
+    let server = {
+        let mut running = manager.running.lock().unwrap();
+        running.remove(&id)
+    };
+    if let Some(mut server) = server {
+        terminate_child(&mut server.child)?;
     }
+    start_server(state, manager, app_handle, id)
+}
+
+#[tauri::command]
+pub fn get_server_output(manager: State<ServerManager>, id: String) -> Vec<String> {
+    let logs = manager.logs.lock().unwrap();
+    logs.get(&id)
+        .map(|buf| buf.lock().unwrap().clone())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
 pub fn export_server_log(manager: State<ServerManager>, id: String, path: String) -> Result<(), String> {
-    let running = manager.0.lock().unwrap();
-    if let Some(server) = running.get(&id) {
-        let output = server.output.lock().unwrap();
-        let content = output.join("\n");
-        std::fs::write(&path, content).map_err(|e| format!("Failed to write log: {}", e))?;
-        Ok(())
-    } else {
-        Err("Server is not running".to_string())
-    }
+    let content = {
+        let logs = manager.logs.lock().unwrap();
+        let buf = logs.get(&id).ok_or("No log output for this server")?;
+        let output = buf.lock().unwrap();
+        output.join("\n")
+    };
+    std::fs::write(&path, content).map_err(|e| format!("Failed to write log: {}", e))
 }
 
 #[tauri::command]
 pub fn get_server_resources(manager: State<ServerManager>, id: String) -> Result<ServerResources, String> {
-    let running = manager.0.lock().unwrap();
-    let server = running.get(&id).ok_or("Server is not running")?;
-
-    let pid = server.child.id();
-    let uptime_secs = server.started_at.elapsed().as_secs();
+    let (pid, uptime_secs) = {
+        let running = manager.running.lock().unwrap();
+        let server = running.get(&id).ok_or("Server is not running")?;
+        (server.child.id(), server.started_at.elapsed().as_secs())
+    };
 
     // Read memory from /proc/{pid}/status
     let memory_kb = std::fs::read_to_string(format!("/proc/{}/status", pid))
@@ -325,7 +456,8 @@ pub fn get_server_resources(manager: State<ServerManager>, id: String) -> Result
         })
         .unwrap_or(0);
 
-    // Read CPU from /proc/{pid}/stat
+    // Read CPU from /proc/{pid}/stat (the sampling sleep happens outside
+    // the manager lock so other commands aren't blocked).
     let cpu_percent = read_cpu_percent(pid).unwrap_or(0.0);
 
     Ok(ServerResources {
@@ -369,14 +501,24 @@ fn read_cpu_percent(pid: u32) -> Option<f64> {
 
 #[tauri::command]
 pub fn get_all_server_statuses(manager: State<ServerManager>) -> Vec<ServerStatus> {
-    let running = manager.0.lock().unwrap();
-    running
+    let running = manager.running.lock().unwrap();
+    let last_exit = manager.last_exit.lock().unwrap();
+    let mut statuses: Vec<ServerStatus> = running
         .keys()
         .map(|id| ServerStatus {
             id: id.clone(),
             state: "running".to_string(),
         })
-        .collect()
+        .collect();
+    for (id, exit) in last_exit.iter() {
+        if !running.contains_key(id) {
+            statuses.push(ServerStatus {
+                id: id.clone(),
+                state: if exit.crashed { "crashed" } else { "stopped" }.to_string(),
+            });
+        }
+    }
+    statuses
 }
 
 /// Background watcher: reaps crashed servers and triggers auto-restart.
@@ -386,32 +528,46 @@ pub fn start_server_watcher(app_handle: &AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
 
-        let crashed: Vec<(String, RunningServer)> = {
+        let exited: Vec<(String, RunningServer, bool)> = {
             let manager = handle.try_state::<ServerManager>().unwrap();
-            let mut running = manager.0.lock().unwrap();
-            let mut to_remove = Vec::new();
+            let mut running = manager.running.lock().unwrap();
+            let mut to_remove: Vec<(String, bool)> = Vec::new();
             for (id, server) in running.iter_mut() {
                 match server.child.try_wait() {
-                    Ok(Some(_)) | Err(_) => to_remove.push(id.clone()),
+                    Ok(Some(status)) => to_remove.push((id.clone(), !status.success())),
+                    Err(_) => to_remove.push((id.clone(), true)),
                     Ok(None) => {}
                 }
             }
             to_remove
                 .into_iter()
-                .filter_map(|id| running.remove(&id).map(|s| (id, s)))
+                .filter_map(|(id, crashed)| running.remove(&id).map(|s| (id, s, crashed)))
                 .collect()
         };
 
-        if crashed.is_empty() {
+        if exited.is_empty() {
             continue;
         }
 
         let _ = handle.emit("tray-update", ());
 
-        for (id, old_server) in crashed {
+        for (id, old_server, crashed) in exited {
+            {
+                let manager = handle.try_state::<ServerManager>().unwrap();
+                manager.last_exit.lock().unwrap().insert(id.clone(), LastExit { crashed });
+            }
+
             let cs = handle.try_state::<ConfigState>().unwrap();
             let config = cs.0.lock().unwrap().clone();
             let Some(entry) = config.servers.iter().find(|s| s.id == id).cloned() else { continue };
+
+            if crashed && config.settings.notifications_enabled {
+                let _ = handle.emit(
+                    "server-notification",
+                    format!("Server \"{}\" crashed", entry.name),
+                );
+            }
+
             if !entry.auto_restart || old_server.restart_count >= entry.max_retries {
                 continue;
             }
@@ -420,11 +576,14 @@ pub fn start_server_watcher(app_handle: &AppHandle) {
             let id_inner = id.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(cooldown);
-                if let Ok(mut new_server) = spawn_server(&entry, &handle_inner) {
+                let manager = handle_inner.try_state::<ServerManager>().unwrap();
+                let log_buf = manager.log_buffer(&id_inner);
+                if let Ok(mut new_server) = spawn_server(&entry, &handle_inner, log_buf) {
                     new_server.restart_count = old_server.restart_count + 1;
-                    let manager = handle_inner.try_state::<ServerManager>().unwrap();
-                    let mut running = manager.0.lock().unwrap();
-                    running.insert(id_inner, new_server);
+                    let mut running = manager.running.lock().unwrap();
+                    running.insert(id_inner.clone(), new_server);
+                    drop(running);
+                    manager.last_exit.lock().unwrap().remove(&id_inner);
                     let _ = handle_inner.emit("tray-update", ());
                 }
             });
@@ -455,11 +614,12 @@ pub fn open_server_directory(state: State<ConfigState>, id: String) -> Result<()
 /// Auto-launch servers marked with auto_launch on startup
 pub fn auto_launch_servers(config: &ConfigState, manager: &ServerManager, app_handle: &AppHandle) {
     let config = config.0.lock().unwrap();
-    let mut running = manager.0.lock().unwrap();
 
     for entry in &config.servers {
         if entry.auto_launch {
-            if let Ok(server) = spawn_server(entry, app_handle) {
+            let log_buf = manager.log_buffer(&entry.id);
+            if let Ok(server) = spawn_server(entry, app_handle, log_buf) {
+                let mut running = manager.running.lock().unwrap();
                 running.insert(entry.id.clone(), server);
             }
         }

@@ -1,9 +1,12 @@
 <script>
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { save, open as openDialog } from "@tauri-apps/plugin-dialog";
 
   let showMenu = $state(false);
   let settingsOpen = $state(false);
   let aboutOpen = $state(false);
+  let appVersion = $state("");
 
   // Settings form state
   let defaultCheckInterval = $state(60);
@@ -11,6 +14,7 @@
   let notifyOnDown = $state(true);
   let notifyOnUp = $state(true);
   let minimizeToTray = $state(true);
+  let autostart = $state(false);
 
   function toggleMenu() {
     showMenu = !showMenu;
@@ -29,35 +33,86 @@
       notifyOnDown = s.notify_on_down;
       notifyOnUp = s.notify_on_up;
       minimizeToTray = s.minimize_to_tray;
+      autostart = s.autostart;
     } catch (_) {}
     settingsOpen = true;
   }
 
   async function saveSettings() {
-    await invoke("update_settings", {
-      settings: {
-        default_check_interval_secs: defaultCheckInterval,
-        notifications_enabled: notificationsEnabled,
-        notify_on_down: notifyOnDown,
-        notify_on_up: notifyOnUp,
-        minimize_to_tray: minimizeToTray,
-      },
-    });
-    settingsOpen = false;
+    try {
+      await invoke("update_settings", {
+        settings: {
+          default_check_interval_secs: defaultCheckInterval,
+          notifications_enabled: notificationsEnabled,
+          notify_on_down: notifyOnDown,
+          notify_on_up: notifyOnUp,
+          minimize_to_tray: minimizeToTray,
+          autostart: autostart,
+        },
+      });
+      settingsOpen = false;
+    } catch (e) {
+      showToast(`Error: ${e}`);
+    }
+  }
+
+  async function openAbout() {
+    closeMenu();
+    try {
+      appVersion = await getVersion();
+    } catch (_) {}
+    aboutOpen = true;
   }
 
   async function createDesktopEntry() {
     closeMenu();
     try {
       const path = await invoke("create_desktop_entry");
-      desktopMsg = `Created: ${path}`;
+      showToast(`Created: ${path}`);
     } catch (e) {
-      desktopMsg = `Error: ${e}`;
+      showToast(`Error: ${e}`);
     }
-    setTimeout(() => desktopMsg = null, 4000);
+  }
+
+  async function exportConfig() {
+    closeMenu();
+    const path = await save({
+      defaultPath: "raz-config.json",
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!path) return;
+    try {
+      await invoke("export_config", { path });
+      showToast("Config exported");
+    } catch (e) {
+      showToast(`Error: ${e}`);
+    }
+  }
+
+  async function importConfig() {
+    closeMenu();
+    const path = await openDialog({
+      filters: [{ name: "JSON", extensions: ["json"] }],
+      multiple: false,
+      directory: false,
+    });
+    if (!path) return;
+    try {
+      await invoke("import_config", { path });
+      showToast("Config imported");
+    } catch (e) {
+      showToast(`Error: ${e}`);
+    }
   }
 
   let desktopMsg = $state(null);
+  let toastTimer = null;
+
+  function showToast(msg) {
+    desktopMsg = msg;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => desktopMsg = null, 4000);
+  }
 
   async function quitApp() {
     await invoke("quit_app");
@@ -79,7 +134,11 @@
     <div class="menu-dropdown">
       <button onclick={openSettings}>Settings</button>
       <button onclick={createDesktopEntry}>Create Desktop Icon</button>
-      <button onclick={() => { aboutOpen = true; closeMenu(); }}>About</button>
+      <hr />
+      <button onclick={exportConfig}>Export Config&hellip;</button>
+      <button onclick={importConfig}>Import Config&hellip;</button>
+      <hr />
+      <button onclick={openAbout}>About</button>
       <hr />
       <button onclick={quitApp}>Quit</button>
     </div>
@@ -101,7 +160,7 @@
       </div>
       <div class="about-body">
         <div class="about-title">Raz</div>
-        <div class="about-version">v1.1.0</div>
+        <div class="about-version">{appVersion ? `v${appVersion}` : ""}</div>
         <p class="about-description">A minimal personal launcher and homepage for launching apps, bookmarking links, and monitoring system and service status.</p>
         <div class="about-meta">
           <span>Built with Tauri v2 + Svelte</span>
@@ -150,6 +209,10 @@
           <label class="checkbox-label">
             <input type="checkbox" bind:checked={minimizeToTray} />
             Minimize to tray on close
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" bind:checked={autostart} />
+            Start Raz at login
           </label>
         </fieldset>
 

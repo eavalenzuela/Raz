@@ -1,10 +1,12 @@
-use crate::config::{save_snapshot, AppEntry, ConfigState, EnvVar, LinkEntry, Settings};
+use crate::config::{save_snapshot, AppEntry, ConfigState, EnvVar, LinkEntry, RazConfig, Settings};
 use std::collections::HashMap;
 use std::process::Command;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
-pub fn quit_app() {
+pub fn quit_app(app_handle: AppHandle) {
+    // Don't orphan the processes we spawned.
+    crate::servers::shutdown_all_servers(&app_handle);
     std::process::exit(0);
 }
 
@@ -109,6 +111,9 @@ pub fn launch_app(state: State<ConfigState>, id: String) -> Result<(), String> {
         cmd.arg("-c").arg(raw);
         if let Some(ref dir) = app.working_directory {
             cmd.current_dir(dir);
+        }
+        for env in &app.env_vars {
+            cmd.env(&env.key, &env.value);
         }
         cmd.spawn().map_err(|e| format!("Failed to launch: {}", e))?;
     } else if let Some(ref executable) = app.executable {
@@ -498,6 +503,17 @@ pub fn bulk_import_desktop(
 
 // ── Links ──────────────────────────────────────────────
 
+/// Prepend https:// to scheme-less URLs so "example.com" works for both
+/// opening in the browser and favicon fetching.
+fn normalize_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{}", trimmed)
+    }
+}
+
 #[tauri::command]
 pub fn get_links(state: State<ConfigState>) -> Vec<LinkEntry> {
     let config = state.0.lock().unwrap();
@@ -512,7 +528,7 @@ pub fn add_link(
     icon: Option<String>,
     folder: Option<String>,
 ) -> Result<LinkEntry, String> {
-    let entry = LinkEntry::new(name, url, icon, folder);
+    let entry = LinkEntry::new(name, normalize_url(&url), icon, folder);
     {
         let mut config = state.0.lock().unwrap();
         config.links.push(entry.clone());
@@ -534,7 +550,7 @@ pub fn update_link(
         let mut config = state.0.lock().unwrap();
         let link = config.links.iter_mut().find(|l| l.id == id).ok_or("Link not found")?;
         link.name = name;
-        link.url = url;
+        link.url = normalize_url(&url);
         link.icon = icon;
         link.folder = folder;
         link.clone()
@@ -647,16 +663,52 @@ pub fn open_link(url: String) -> Result<(), String> {
 
 // ── Desktop Entry ─────────────────────────────────────
 
-#[tauri::command]
-pub fn create_desktop_entry() -> Result<String, String> {
-    // Prefer the installed path; fall back to current executable
+/// Prefer the installed path; fall back to the current executable.
+fn resolve_exe_path() -> Result<std::path::PathBuf, String> {
     let installed = std::path::PathBuf::from("/usr/bin/raz");
-    let exe_path = if installed.exists() {
-        installed
+    if installed.exists() {
+        Ok(installed)
     } else {
         std::env::current_exe()
-            .map_err(|e| format!("Cannot determine executable path: {}", e))?
-    };
+            .map_err(|e| format!("Cannot determine executable path: {}", e))
+    }
+}
+
+/// Create or remove the XDG autostart entry (~/.config/autostart/raz.desktop).
+fn apply_autostart(enabled: bool) -> Result<(), String> {
+    let autostart_dir = dirs::config_dir()
+        .ok_or("Cannot determine config directory")?
+        .join("autostart");
+    let path = autostart_dir.join("raz.desktop");
+
+    if enabled {
+        let exe_path = resolve_exe_path()?;
+        std::fs::create_dir_all(&autostart_dir)
+            .map_err(|e| format!("Failed to create autostart dir: {}", e))?;
+        let content = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=Raz\n\
+             Comment=Personal launcher and homepage\n\
+             Exec={}\n\
+             Terminal=false\n\
+             X-GNOME-Autostart-enabled=true\n",
+            exe_path.display(),
+        );
+        std::fs::write(&path, content)
+            .map_err(|e| format!("Failed to write autostart entry: {}", e))
+    } else {
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("Failed to remove autostart entry: {}", e)),
+        }
+    }
+}
+
+#[tauri::command]
+pub fn create_desktop_entry() -> Result<String, String> {
+    let exe_path = resolve_exe_path()?;
 
     // Copy icon to ~/.local/share/icons/
     let data_dir = dirs::data_dir().ok_or("Cannot determine data directory")?;
@@ -730,6 +782,13 @@ pub fn update_settings(
     state: State<ConfigState>,
     settings: Settings,
 ) -> Result<Settings, String> {
+    let prev_autostart = {
+        let config = state.0.lock().unwrap();
+        config.settings.autostart
+    };
+    if settings.autostart != prev_autostart {
+        apply_autostart(settings.autostart)?;
+    }
     let result = {
         let mut config = state.0.lock().unwrap();
         config.settings = settings;
@@ -737,6 +796,36 @@ pub fn update_settings(
     };
     save_snapshot(&state)?;
     Ok(result)
+}
+
+// ── Config Export / Import ────────────────────────────
+
+#[tauri::command]
+pub fn export_config(state: State<ConfigState>, path: String) -> Result<(), String> {
+    let snapshot = { state.0.lock().unwrap().clone() };
+    let data = serde_json::to_string_pretty(&snapshot).map_err(|e| e.to_string())?;
+    std::fs::write(&path, data).map_err(|e| format!("Failed to write config: {}", e))
+}
+
+#[tauri::command]
+pub fn import_config(
+    state: State<ConfigState>,
+    app_handle: AppHandle,
+    path: String,
+) -> Result<(), String> {
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let parsed: RazConfig =
+        serde_json::from_str(&data).map_err(|e| format!("Invalid config file: {}", e))?;
+    {
+        let mut config = state.0.lock().unwrap();
+        *config = parsed;
+    }
+    save_snapshot(&state)?;
+    let _ = app_handle.emit("config-imported", ());
+    let _ = app_handle.emit("pinned-changed", ());
+    let _ = app_handle.emit("tray-update", ());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -779,5 +868,19 @@ mod tests {
     fn errors_on_missing_required_fields() {
         let raw = "[Desktop Entry]\nName=Foo\n";
         assert!(parse_desktop_file(raw).is_err());
+    }
+
+    #[test]
+    fn normalize_url_adds_scheme() {
+        assert_eq!(normalize_url("example.com"), "https://example.com");
+        assert_eq!(normalize_url("  example.com/path  "), "https://example.com/path");
+        assert_eq!(normalize_url("localhost:8080"), "https://localhost:8080");
+    }
+
+    #[test]
+    fn normalize_url_keeps_existing_scheme() {
+        assert_eq!(normalize_url("https://example.com"), "https://example.com");
+        assert_eq!(normalize_url("http://localhost:3000"), "http://localhost:3000");
+        assert_eq!(normalize_url(""), "");
     }
 }

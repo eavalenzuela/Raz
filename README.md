@@ -6,10 +6,12 @@ A minimal personal launcher and homepage built with Rust, Tauri v2, and Svelte. 
 
 - **Apps** — Launch local applications and games with configurable paths, arguments, environment variables, and icons. Import from `.desktop` files. Right-click to edit, open directory, or pin to sidebar.
 - **Links** — Bookmark URLs with auto-fetched favicons in a draggable grid. Click to open in your browser. Right-click to edit, pin, or remove.
-- **Servers** — Manage local server processes (dev servers, game servers, self-hosted services). Start/stop controls, live stdout/stderr log viewer, auto-launch on startup.
-- **Status Monitor** — Live HTTP and ping checks in the sidebar with up/down indicators, configurable intervals, and desktop notifications on state changes.
+- **Servers** — Manage local server processes (dev servers, game servers, self-hosted services). Start/stop/restart controls, live stdout/stderr log viewer (retained after the process exits), auto-launch on startup, crash detection with notifications.
+- **Command Palette** — Press `Ctrl+K` to fuzzy-find any app, link, or server and launch/open/start it from the keyboard.
+- **Status Monitor** — Live HTTP and ping checks in the sidebar with up/down indicators, uptime history strips, configurable intervals, and desktop notifications on state changes.
 - **System Tray** — Minimize to tray on close, server status visible in the tray menu, click to restore.
-- **Settings** — Configure check intervals, notification preferences, and tray behavior from the UI.
+- **Settings** — Configure check intervals, notification preferences, tray behavior, and start-at-login from the UI.
+- **Backup** — Export and import the entire config as JSON from the menu.
 - **Theming** — Automatically matches your system light/dark preference.
 
 ## Install

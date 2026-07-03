@@ -88,8 +88,18 @@ A minimal personal launcher and homepage. Not a power-user dashboard — a clean
 - [x] Log search/filter — text filter or regex search within the log viewer, with highlight
 - [x] Log export — button to save the current log buffer to a file
 - [x] Resource monitoring — show PID, uptime, and CPU/memory usage per running server (via `/proc` on Linux)
+- [x] Restart action — one-click restart from the row or context menu
+- [x] Log retention — logs survive stop/crash and can still be viewed/exported
+- [x] Crash detection — distinct "crashed" state plus desktop notification
+- [x] Process-group termination — stop/quit kills the whole process tree, not just `bash -c`
+
+### General
+- [x] Command palette — Ctrl+K fuzzy search across apps, links, and servers
+- [x] Config export/import — JSON backup and restore from the menu
+- [x] Start at login — XDG autostart entry managed from Settings
+- [x] Monitor uptime history — last 30 check results rendered as a bead strip
 
 ### Future Considerations
-- Global hotkey / Spotlight-style summoning
+- Global hotkey / Spotlight-style summoning (system-wide; in-app palette exists)
 - Plugin/extension system
 - Multi-machine sync

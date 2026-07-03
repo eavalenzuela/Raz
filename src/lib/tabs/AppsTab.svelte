@@ -1,7 +1,8 @@
 <script>
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
 
   let apps = $state([]);
   let showAddModal = $state(false);
@@ -34,7 +35,16 @@
   // Icon cache: app id -> base64 data URL
   let iconCache = $state({});
 
-  onMount(loadApps);
+  let unlistenImport = null;
+
+  onMount(async () => {
+    await loadApps();
+    unlistenImport = await listen("config-imported", loadApps);
+  });
+
+  onDestroy(() => {
+    if (unlistenImport) unlistenImport();
+  });
 
   async function loadApps() {
     apps = await invoke("get_apps");
@@ -132,7 +142,7 @@
       executable: formMode === "simple" ? (formExecutable || null) : null,
       arguments: formMode === "simple" ? args : [],
       workingDirectory: formWorkingDir || null,
-      envVars: formMode === "simple" ? envVars : [],
+      envVars,
       icon: formIcon || null,
       typeLabel: formTypeLabel || null,
     };
@@ -220,9 +230,13 @@
     contextMenu = null;
   }
 
-  // Drag-and-drop reordering
+  // Drag-and-drop reordering. Only allowed with manual sort and no active
+  // filter — reordering a filtered subset would silently drop the hidden
+  // apps from the local list.
+  let canDrag = $derived(sortMode === "manual" && !searchQuery.trim());
+
   function onDragStart(event, index) {
-    if (sortMode !== "manual") return;
+    if (!canDrag) return;
     dragIndex = index;
     didDrag = true;
     event.dataTransfer.effectAllowed = "move";
@@ -344,7 +358,7 @@
           class="app-card"
           class:dragging={dragIndex === i}
           class:drop-target={dropIndex === i && dragIndex !== i}
-          draggable={sortMode === "manual"}
+          draggable={canDrag}
           onclick={() => handleClick(app)}
           oncontextmenu={(e) => showContextMenu(e, app)}
           ondragstart={(e) => onDragStart(e, i)}
@@ -382,7 +396,7 @@
           class="app-grid-card"
           class:dragging={dragIndex === i}
           class:drop-target={dropIndex === i && dragIndex !== i}
-          draggable={sortMode === "manual"}
+          draggable={canDrag}
           onclick={() => handleClick(app)}
           oncontextmenu={(e) => showContextMenu(e, app)}
           ondragstart={(e) => onDragStart(e, i)}
@@ -454,7 +468,7 @@
           <label>
             Shell Command
             <textarea bind:value={formRawCommand} required placeholder='env WINEPREFIX="/home/user/.wine" wine-stable C:\\windows\\command\\start.exe ...' rows="3"></textarea>
-            <span class="hint">Full command as you'd type it in a terminal. Executed via sh -c.</span>
+            <span class="hint">Full command as you'd type it in a terminal. Executed via bash -c.</span>
           </label>
         {:else}
           <label>
@@ -466,20 +480,20 @@
             Arguments
             <input type="text" bind:value={formArguments} placeholder="--flag value" />
           </label>
-
-          <fieldset>
-            <legend>Environment Variables</legend>
-            {#each formEnvVars as envVar, i}
-              <div class="env-row">
-                <input type="text" bind:value={envVar.key} placeholder="KEY" />
-                <span>=</span>
-                <input type="text" bind:value={envVar.value} placeholder="value" />
-                <button type="button" class="remove-env" onclick={() => removeEnvVar(i)}>&times;</button>
-              </div>
-            {/each}
-            <button type="button" class="add-env-btn" onclick={addEnvVar}>+ Add Variable</button>
-          </fieldset>
         {/if}
+
+        <fieldset>
+          <legend>Environment Variables</legend>
+          {#each formEnvVars as envVar, i}
+            <div class="env-row">
+              <input type="text" bind:value={envVar.key} placeholder="KEY" />
+              <span>=</span>
+              <input type="text" bind:value={envVar.value} placeholder="value" />
+              <button type="button" class="remove-env" onclick={() => removeEnvVar(i)}>&times;</button>
+            </div>
+          {/each}
+          <button type="button" class="add-env-btn" onclick={addEnvVar}>+ Add Variable</button>
+        </fieldset>
 
         <label>
           Working Directory

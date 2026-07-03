@@ -1,9 +1,12 @@
 use crate::config::{save_snapshot, ConfigState, PinnedItem, StatusMonitor};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
+
+/// How many past check results to retain per monitor for the uptime strip.
+const HISTORY_LEN: usize = 30;
 
 // ── Pinned Items ───────────────────────────────────────
 
@@ -58,6 +61,8 @@ pub struct MonitorStatus {
     pub id: String,
     pub state: String, // "up", "down", "unknown"
     pub last_check: Option<u64>, // seconds ago
+    /// Most recent check results, oldest first (true = up).
+    pub history: Vec<bool>,
 }
 
 pub struct MonitorState {
@@ -68,6 +73,7 @@ pub struct MonitorState {
 pub struct MonitorStatusEntry {
     state: String,
     last_check: Instant,
+    history: Vec<bool>,
 }
 
 impl MonitorState {
@@ -125,11 +131,17 @@ pub fn update_status_monitor(
 }
 
 #[tauri::command]
-pub fn remove_status_monitor(state: State<ConfigState>, id: String) -> Result<(), String> {
+pub fn remove_status_monitor(
+    state: State<ConfigState>,
+    monitor_state: State<MonitorState>,
+    id: String,
+) -> Result<(), String> {
     {
         let mut config = state.0.lock().unwrap();
         config.status_monitors.retain(|m| m.id != id);
     }
+    // Drop the cached status so the status bar doesn't keep counting it.
+    monitor_state.statuses.lock().unwrap().remove(&id);
     save_snapshot(&state)
 }
 
@@ -142,6 +154,7 @@ pub fn get_monitor_statuses(monitor_state: State<MonitorState>) -> Vec<MonitorSt
             id: id.clone(),
             state: entry.state.clone(),
             last_check: Some(entry.last_check.elapsed().as_secs()),
+            history: entry.history.clone(),
         })
         .collect()
 }
@@ -153,7 +166,15 @@ fn check_target(target: &str, check_type: &str) -> bool {
                 .timeout(Duration::from_secs(10))
                 .build();
             match client {
-                Ok(c) => c.get(target).send().is_ok(),
+                // A reachable server returning 4xx/5xx is not "up" — only
+                // count 2xx/3xx as healthy.
+                Ok(c) => match c.get(target).send() {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        status.is_success() || status.is_redirection()
+                    }
+                    Err(_) => false,
+                },
                 Err(_) => false,
             }
         }
@@ -191,6 +212,7 @@ pub fn start_monitor_loop(
             pending_state: String,
             pending_count: u32,
             next_check: Instant,
+            history: VecDeque<bool>,
         }
         let mut trackers: HashMap<String, Tracker> = HashMap::new();
 
@@ -210,16 +232,33 @@ pub fn start_monitor_loop(
                 monitors.iter().map(|m| m.id.clone()).collect();
             trackers.retain(|id, _| monitor_ids.contains(id));
 
-            for monitor in &monitors {
-                let due = trackers
-                    .get(&monitor.id)
-                    .map(|t| now >= t.next_check)
-                    .unwrap_or(true);
-                if !due {
-                    continue;
-                }
+            // Run every due check on its own thread so one slow or down
+            // target (up to a 10s timeout) can't delay the others.
+            let due: Vec<StatusMonitor> = monitors
+                .into_iter()
+                .filter(|m| {
+                    trackers
+                        .get(&m.id)
+                        .map(|t| now >= t.next_check)
+                        .unwrap_or(true)
+                })
+                .collect();
+            let results: Vec<(StatusMonitor, bool)> = due
+                .into_iter()
+                .map(|monitor| {
+                    std::thread::spawn(move || {
+                        let is_up = check_target(&monitor.target, &monitor.check_type);
+                        (monitor, is_up)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .collect();
 
-                let is_up = check_target(&monitor.target, &monitor.check_type);
+            let checked_any = !results.is_empty();
+
+            for (monitor, is_up) in results {
                 let new_state = if is_up { "up" } else { "down" }.to_string();
 
                 let interval = Duration::from_secs(monitor.check_interval_secs.max(5));
@@ -228,6 +267,7 @@ pub fn start_monitor_loop(
                     pending_state: new_state.clone(),
                     pending_count: 0,
                     next_check: now,
+                    history: VecDeque::new(),
                 });
 
                 if entry.pending_state == new_state {
@@ -237,6 +277,10 @@ pub fn start_monitor_loop(
                     entry.pending_count = 1;
                 }
                 entry.next_check = now + interval;
+                entry.history.push_back(is_up);
+                if entry.history.len() > HISTORY_LEN {
+                    entry.history.pop_front();
+                }
 
                 // First observation announces immediately (no flap to debounce).
                 // Subsequent transitions require DEBOUNCE_CHECKS confirmations.
@@ -270,10 +314,13 @@ pub fn start_monitor_loop(
                         MonitorStatusEntry {
                             state: entry.announced_state.clone(),
                             last_check: Instant::now(),
+                            history: entry.history.iter().copied().collect(),
                         },
                     );
                 }
+            }
 
+            if checked_any {
                 let _ = handle.emit("monitor-update", ());
             }
 

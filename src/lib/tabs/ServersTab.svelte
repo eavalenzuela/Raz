@@ -13,6 +13,7 @@
   let outputLines = $state([]);
   let outputEl = $state(null);
   let unlisten = null;
+  let unlistenImport = null;
   let pollInterval = null;
 
   // Log search/filter
@@ -64,10 +65,16 @@
         });
       }
     });
+
+    unlistenImport = await listen("config-imported", () => {
+      loadServers();
+      pollStatuses();
+    });
   });
 
   onDestroy(() => {
     if (unlisten) unlisten();
+    if (unlistenImport) unlistenImport();
     if (pollInterval) clearInterval(pollInterval);
     if (resourceInterval) clearInterval(resourceInterval);
   });
@@ -145,7 +152,7 @@
       executable: formMode === "simple" ? (formExecutable || null) : null,
       arguments: formMode === "simple" ? args : [],
       workingDirectory: formWorkingDir || null,
-      envVars: formMode === "simple" ? envVars : [],
+      envVars,
       autoLaunch: formAutoLaunch,
       autoRestart: formAutoRestart,
       maxRetries: formMaxRetries,
@@ -180,6 +187,16 @@
     } catch (e) {
       console.error("Failed to stop server:", e);
     }
+  }
+
+  async function restartServer(server) {
+    try {
+      await invoke("restart_server", { id: server.id });
+      await pollStatuses();
+    } catch (e) {
+      console.error("Failed to restart server:", e);
+    }
+    contextMenu = null;
   }
 
   async function selectServer(server) {
@@ -310,6 +327,7 @@
             {/if}
             <div class="server-actions">
               {#if serverState(server) === "running"}
+                <button class="action-btn restart" onclick={(e) => { e.stopPropagation(); restartServer(server); }} title="Restart">&#8635;</button>
                 <button class="action-btn stop" onclick={(e) => { e.stopPropagation(); stopServer(server); }} title="Stop">&#9632;</button>
               {:else}
                 <button class="action-btn start" onclick={(e) => { e.stopPropagation(); startServer(server); }} title="Start">&#9654;</button>
@@ -372,6 +390,9 @@
     <button onclick={() => openEditModal(contextMenu.server)}>Edit</button>
     <button onclick={() => openDirectory(contextMenu.server)}>Open Directory</button>
     <button onclick={() => viewLogs(contextMenu.server)}>View Logs</button>
+    {#if serverState(contextMenu.server) === "running"}
+      <button onclick={() => restartServer(contextMenu.server)}>Restart</button>
+    {/if}
     <hr />
     <button class="danger" onclick={() => removeServer(contextMenu.server)}>Remove</button>
   </div>
@@ -413,20 +434,20 @@
             Arguments
             <input type="text" bind:value={formArguments} placeholder="-m http.server 8080" />
           </label>
-
-          <fieldset>
-            <legend>Environment Variables</legend>
-            {#each formEnvVars as envVar, i}
-              <div class="env-row">
-                <input type="text" bind:value={envVar.key} placeholder="KEY" />
-                <span>=</span>
-                <input type="text" bind:value={envVar.value} placeholder="value" />
-                <button type="button" class="remove-env" onclick={() => removeEnvVar(i)}>&times;</button>
-              </div>
-            {/each}
-            <button type="button" class="add-env-btn" onclick={addEnvVar}>+ Add Variable</button>
-          </fieldset>
         {/if}
+
+        <fieldset>
+          <legend>Environment Variables</legend>
+          {#each formEnvVars as envVar, i}
+            <div class="env-row">
+              <input type="text" bind:value={envVar.key} placeholder="KEY" />
+              <span>=</span>
+              <input type="text" bind:value={envVar.value} placeholder="value" />
+              <button type="button" class="remove-env" onclick={() => removeEnvVar(i)}>&times;</button>
+            </div>
+          {/each}
+          <button type="button" class="add-env-btn" onclick={addEnvVar}>+ Add Variable</button>
+        </fieldset>
 
         <label>
           Working Directory
@@ -625,6 +646,7 @@
 
   .action-btn.start { color: #22c55e; }
   .action-btn.stop { color: #ef4444; }
+  .action-btn.restart { color: var(--accent); }
 
   /* Output panel */
   .output-panel {

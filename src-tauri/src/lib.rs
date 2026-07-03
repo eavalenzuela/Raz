@@ -18,7 +18,7 @@ fn build_tray_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<ta
         let config_state = app.try_state::<ConfigState>().unwrap();
         let manager = app.try_state::<ServerManager>().unwrap();
         let config = config_state.0.lock().unwrap();
-        let running = manager.0.lock().unwrap();
+        let running = manager.running.lock().unwrap();
         let running_ids: std::collections::HashSet<String> = running.keys().cloned().collect();
         config
             .servers
@@ -112,6 +112,7 @@ pub fn run() {
             servers::remove_server,
             servers::start_server,
             servers::stop_server,
+            servers::restart_server,
             servers::get_server_output,
             servers::get_all_server_statuses,
             servers::export_server_log,
@@ -128,6 +129,8 @@ pub fn run() {
             commands::get_settings,
             commands::update_settings,
             commands::create_desktop_entry,
+            commands::export_config,
+            commands::import_config,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -157,6 +160,8 @@ pub fn run() {
                             restore_window(&handle_for_menu);
                         }
                         "quit" => {
+                            // Don't orphan managed servers on quit.
+                            servers::shutdown_all_servers(&handle_for_menu);
                             std::process::exit(0);
                         }
                         _ => {}

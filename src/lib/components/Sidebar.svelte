@@ -20,7 +20,9 @@
 
   let unlistenUpdate = null;
   let unlistenNotify = null;
+  let unlistenServerNotify = null;
   let unlistenPinned = null;
+  let unlistenImport = null;
   let pollInterval = null;
 
   onMount(async () => {
@@ -38,15 +40,27 @@
       sendNotification({ title: "Raz", body: event.payload });
     });
 
+    unlistenServerNotify = await listen("server-notification", (event) => {
+      sendNotification({ title: "Raz", body: event.payload });
+    });
+
     unlistenPinned = await listen("pinned-changed", () => {
       loadPinned();
+    });
+
+    unlistenImport = await listen("config-imported", () => {
+      loadPinned();
+      loadMonitors();
+      pollMonitorStatuses();
     });
   });
 
   onDestroy(() => {
     if (unlistenUpdate) unlistenUpdate();
     if (unlistenNotify) unlistenNotify();
+    if (unlistenServerNotify) unlistenServerNotify();
     if (unlistenPinned) unlistenPinned();
+    if (unlistenImport) unlistenImport();
     if (pollInterval) clearInterval(pollInterval);
   });
 
@@ -90,6 +104,18 @@
     return s ? s.state : "unknown";
   }
 
+  function monitorHistory(monitor) {
+    const s = monitorStatuses[monitor.id];
+    return s?.history || [];
+  }
+
+  function historyTitle(monitor) {
+    const h = monitorHistory(monitor);
+    if (h.length === 0) return "";
+    const up = h.filter(Boolean).length;
+    return `Last ${h.length} checks: ${up} up, ${h.length - up} down`;
+  }
+
   function lastCheckLabel(monitor) {
     const s = monitorStatuses[monitor.id];
     if (!s || s.last_check === null) return "";
@@ -99,12 +125,17 @@
     return `${Math.floor(secs / 3600)}h ago`;
   }
 
-  function openAddMonitor() {
+  async function openAddMonitor() {
     editingMonitor = null;
     formName = "";
     formTarget = "";
     formCheckType = "http";
     formInterval = 60;
+    // Respect the configured default check interval from Settings.
+    try {
+      const s = await invoke("get_settings");
+      formInterval = s.default_check_interval_secs;
+    } catch (_) {}
     showMonitorModal = true;
   }
 
@@ -196,9 +227,18 @@
                 oncontextmenu={(e) => showContextMenu(e, monitor)}
                 role="listitem"
               >
-                <span class="monitor-dot {monitorState(monitor)}"></span>
-                <span class="monitor-name">{monitor.name}</span>
-                <span class="monitor-time">{lastCheckLabel(monitor)}</span>
+                <div class="monitor-row">
+                  <span class="monitor-dot {monitorState(monitor)}"></span>
+                  <span class="monitor-name">{monitor.name}</span>
+                  <span class="monitor-time">{lastCheckLabel(monitor)}</span>
+                </div>
+                {#if monitorHistory(monitor).length > 0}
+                  <div class="monitor-beads" title={historyTitle(monitor)}>
+                    {#each monitorHistory(monitor) as up}
+                      <span class="bead" class:up class:down={!up}></span>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             {/each}
           </div>
@@ -426,9 +466,6 @@
   }
 
   .monitor-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
     padding: 4px 8px;
     border-radius: 4px;
     font-size: 0.85em;
@@ -438,6 +475,28 @@
   .monitor-item:hover {
     background: var(--hover);
   }
+
+  .monitor-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .monitor-beads {
+    display: flex;
+    gap: 2px;
+    padding: 3px 0 1px 16px;
+  }
+
+  .bead {
+    width: 4px;
+    height: 10px;
+    border-radius: 1px;
+    flex-shrink: 0;
+  }
+
+  .bead.up { background: #22c55e; }
+  .bead.down { background: #ef4444; }
 
   .monitor-dot {
     width: 8px;
